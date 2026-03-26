@@ -1,0 +1,1 @@
+les commandes pour faire l execution au debut : source venv/bin/activate

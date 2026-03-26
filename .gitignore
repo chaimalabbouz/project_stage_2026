@@ -1,0 +1,6 @@
+data/
+# Exclure l'environnement virtuel
+venv/
+__pycache__/
+*.pyc
+.env
