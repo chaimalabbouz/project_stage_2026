@@ -1,4 +1,5 @@
-# Noms de canvases Figma à ignorer (insensible à la casse, matching partiel)
+# Noms de canvases Figma à ignorer
+# Matching insensible à la casse, partiel (substring)
 CANVAS_BLACKLIST = [
     "cover",
     "wireframe",
@@ -18,6 +19,3 @@ CANVAS_BLACKLIST = [
     "doc",
     "note",
     "reference",
-    "Uikit",
-    "uikit",
-]

@@ -140,5 +140,5 @@ plusieurs canvases → chunk par canvas
 un seul canvas → chunk par grandes frames
 si un chunk reste gros → sous-découpage structurel
 
-👉 c’est la logique de chunking.
+ c’est la logique de chunking.
 """

@@ -17,6 +17,7 @@ PLANNER_DIR = BASE_DIR / "data" / "planner"
 PLANNER_PAYLOAD_FILE = PLANNER_DIR / "planner_payload.json"
 PLANNER_SUMMARY_FILE = PLANNER_DIR / "planner_summary.json"
 PLANNER_CHUNKS_FILE = PLANNER_DIR / "planner_chunks.json"
+PLANNER_PLANNING_FILE = PLANNER_DIR / "planning.json"   # <--- LA LIGNE QUI MANQUAIT
 
 PLANNER_MAX_DEPTH = int(os.getenv("PLANNER_MAX_DEPTH", "3"))
 PLANNER_MAX_CHARS_SINGLE_CALL = int(os.getenv("PLANNER_MAX_CHARS_SINGLE_CALL", "45000"))
