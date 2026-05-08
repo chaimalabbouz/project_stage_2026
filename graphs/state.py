@@ -22,20 +22,8 @@ class PlannerGraphState(TypedDict, total=False):
     # -----------------------------------------------------------------------
     # Phase 2 : construction du payload
     # -----------------------------------------------------------------------
-    planner_payload: dict[str, Any]
-    planner_summary: dict[str, Any]
-    planner_chunks: list[dict[str, Any]]
-
-    planner_payload_chars: int
-    planner_payload_estimated_tokens: int
-    chunk_count: int
-
-    chunk_strategy: Literal[
-        "single_call",
-        "chunk_by_canvas_or_frame",
-        "large_model_required",
-    ]
-    large_model_required: bool
+    planner_input: dict[str, Any]
+    planner_feasibility: Literal["ready", "large_model_required"]
 
     # -----------------------------------------------------------------------
     # Phase 3 : génération LLM

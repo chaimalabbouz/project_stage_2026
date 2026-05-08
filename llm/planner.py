@@ -1,314 +1,154 @@
+"""
+llm/planner.py
+==============
+Appelle le LLM via LangChain pour générer le planning.
+Inclut un retry si le JSON retourné est malformé.
+"""
+
 import json
-import re
+import time
 from typing import Any
+from pathlib import Path
 
-from llm.client import get_llm, MODELS
-from llm.prompts import (
-    build_single_call_prompt,
-    build_first_chunk_prompt,
-    build_next_chunk_prompt,
-    build_merge_prompt,
-    build_summary_prompt,
-)
+from langchain_groq import ChatGroq
+from langchain_core.messages import SystemMessage, HumanMessage
 
+from config.settings import PLANNER_PLANNING_FILE
 
-def _make_chain(prompt_template, model: str):
-    """
-    Crée une chaîne LLM avec fallback vers le modèle large.
-    Sans Pydantic parser: on récupère du JSON brut.
-    """
-    llm = get_llm(model=model)
-    llm_large = get_llm(model=MODELS["large"])
-    llm_with_fallback = llm.with_fallbacks([llm_large])
-    return prompt_template | llm_with_fallback
+GROQ_MODEL = "moonshotai/kimi-k2-instruct"
+MAX_RETRIES = 3
 
+SYSTEM_PROMPT = """\
+You are a frontend project planner. You receive a Figma design structure and a list of reusable components, and you produce a generation plan for a React + Vite + Tailwind CSS project.
 
-def _strip_code_fences(text: str) -> str:
-    text = text.strip()
+Your job is to analyze the structure and output a JSON plan. Nothing else.
 
-    if text.startswith("```json"):
-        text = text[len("```json"):].strip()
-    elif text.startswith("```"):
-        text = text[len("```"):].strip()
+Rules:
+1. Each top-level FRAME in the design canvas is a PAGE.
+2. Each direct child of a page FRAME is a SECTION.
+3. If the same section name appears in multiple pages (e.g. Header, Footer, Navbar), mark it as shared. Shared sections are generated once and reused across pages.
+4. The generation_order must respect dependencies:
+   - Reusable components first (they have no dependencies)
+   - Then shared sections (they may use reusable components)
+   - Then page-specific sections
+   - Then pages (they assemble sections)
 
-    if text.endswith("```"):
-        text = text[:-3].strip()
+You MUST respond with ONLY a valid JSON object. No markdown, no explanation, no backticks, no comments.
 
-    return text
-
-
-def _extract_first_json_block(text: str) -> str:
-    """
-    Essaie d'extraire le premier bloc JSON si le modèle ajoute du texte autour.
-    """
-    text = _strip_code_fences(text)
-
-    if text.startswith("{") and text.endswith("}"):
-        return text
-    if text.startswith("[") and text.endswith("]"):
-        return text
-
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        return match.group(0)
-
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if match:
-        return match.group(0)
-
-    raise ValueError("Aucun JSON valide trouvé dans la réponse du LLM.")
-
-
-def _extract_json_from_response(response: Any) -> dict[str, Any]:
-    """
-    Convertit la réponse du LLM en dict Python.
-    """
-    content = response.content if hasattr(response, "content") else str(response)
-    json_text = _extract_first_json_block(content)
-    data = json.loads(json_text)
-
-    if not isinstance(data, dict):
-        raise ValueError("Le JSON retourné par le LLM doit être un objet JSON.")
-
-    return data
-
-
-def _safe_list(value: Any) -> list:
-    return value if isinstance(value, list) else []
-
-
-def _safe_dict(value: Any) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _normalize_planning(data: dict[str, Any]) -> dict[str, Any]:
-    """
-    Rend le planning plus robuste sans imposer un schéma strict.
-    Mis à jour pour gérer figma_node_id, layout_strategy et les props structurées.
-    """
-    data = _safe_dict(data)
-
-    normalized = {
-        "project_name": data.get("project_name", ""),
-        "description": data.get("description", ""),
-        "folders": _safe_list(data.get("folders")),
-        "files": _safe_list(data.get("files")),
-        "routes": _safe_list(data.get("routes")),
-        "dependencies": _safe_list(data.get("dependencies")),
-        "generation_order": _safe_list(data.get("generation_order")),
-        "notes": data.get("notes", ""),
-    }
-
-    clean_folders = []
-    for folder in normalized["folders"]:
-        if not isinstance(folder, dict):
-            continue
-        clean_folders.append(
-            {
-                "path": folder.get("path", ""),
-                "purpose": folder.get("purpose", ""),
-                **{k: v for k, v in folder.items() if k not in {"path", "purpose"}},
-            }
-        )
-    normalized["folders"] = clean_folders
-
-    clean_files = []
-    for file in normalized["files"]:
-        if not isinstance(file, dict):
-            continue
-        
-        # Normalisation spécifique pour s'assurer que les nouveaux champs existent toujours
-        clean_files.append(
-            {
-                "path": file.get("path", ""),
-                "type": file.get("type", "component"),
-                "component_name": file.get("component_name", ""),
-                "figma_node_id": file.get("figma_node_id", ""),         # NOUVEAU
-                "depends_on": _safe_list(file.get("depends_on")),
-                "reuses_figma_component": file.get("reuses_figma_component"),
-                "description": file.get("description", ""),
-                **{
-                    k: v
-                    for k, v in file.items()
-                    if k
-                    not in {
-                        "path", "type", "component_name", "figma_node_id",
-                        "depends_on", "reuses_figma_component", "description",
-                    }
-                },
-            }
-        )
-    normalized["files"] = clean_files
-
-    clean_routes = []
-    for route in normalized["routes"]:
-        if not isinstance(route, dict):
-            continue
-        clean_routes.append(
-            {
-                "path": route.get("path", ""),
-                "page_component": route.get("page_component", ""),
-                "file_path": route.get("file_path", ""),
-                **{
-                    k: v
-                    for k, v in route.items()
-                    if k not in {"path", "page_component", "file_path"}
-                },
-            }
-        )
-    normalized["routes"] = clean_routes
-
-    clean_dependencies = []
-    for dep in normalized["dependencies"]:
-        if not isinstance(dep, dict):
-            continue
-        clean_dependencies.append(
-            {
-                "package": dep.get("package", ""),
-                "reason": dep.get("reason", ""),
-                **{k: v for k, v in dep.items() if k not in {"package", "reason"}},
-            }
-        )
-    normalized["dependencies"] = clean_dependencies
-
-    normalized["generation_order"] = [
-        item for item in normalized["generation_order"] if isinstance(item, str)
-    ]
-
-    return normalized
-
-
-def _summarize_partial(
-    partial_planning: dict[str, Any],
-    model: str,
-) -> dict[str, Any]:
-    """
-    Résume un planning partiel pour l'étape suivante.
-    Si le LLM échoue, on retourne un fallback minimal.
-    """
-    prompt = build_summary_prompt(partial_planning)
-    chain = _make_chain(prompt, model)
-
-    try:
-        response = chain.invoke({})
-        summary = _extract_json_from_response(response)
-        return summary
-    except Exception as e:
-        print(f"[planner] Résumé LLM échoué, fallback local. Détail: {e}")
-        return {
-            "project_name": partial_planning.get("project_name", ""),
-            "description": partial_planning.get("description", ""),
-            "folders": partial_planning.get("folders", []),
-            "files": [
-                {
-                    "path": f.get("path", ""),
-                    "type": f.get("type", ""),
-                    "component_name": f.get("component_name", ""),
-                }
-                for f in partial_planning.get("files", [])
-                if isinstance(f, dict)
-            ],
+The JSON schema:
+{
+  "pages": [
+    {
+      "page_name": "string",
+      "page_id": "string",
+      "sections": [
+        {
+          "section_name": "string",
+          "section_id": "string"
         }
+      ]
+    }
+  ],
+  "shared_sections": ["string"],
+  "generation_order": [
+    {
+      "type": "component | section | page",
+      "name": "string",
+      "shared": "boolean (only for sections)"
+    }
+  ]
+}
+"""
 
 
-def _merge_plannings(
-    partial_plannings: list[dict[str, Any]],
-    model: str,
-) -> dict[str, Any]:
-    """
-    Fusionne plusieurs plannings partiels.
-    """
-    if len(partial_plannings) == 1:
-        return _normalize_planning(partial_plannings[0])
-
-    prompt = build_merge_prompt(partial_plannings)
-    chain = _make_chain(prompt, model)
-    response = chain.invoke({})
-    merged = _extract_json_from_response(response)
-    return _normalize_planning(merged)
+def _get_llm() -> ChatGroq:
+    return ChatGroq(model=GROQ_MODEL, temperature=0.0, max_tokens=4096)
 
 
-def _run_single_call(
-    payload: dict[str, Any],
-    model: str,
-) -> dict[str, Any]:
-    print("[planner] Stratégie: appel unique")
-    prompt = build_single_call_prompt(payload)
-    chain = _make_chain(prompt, model)
-    response = chain.invoke({})
-    planning = _extract_json_from_response(response)
-    return _normalize_planning(planning)
+def _call_llm(system_prompt: str, user_prompt: str) -> str:
+    llm = _get_llm()
+    response = llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ])
+    return response.content.strip()
 
 
-def _run_chunked_calls(
-    chunks: list[dict[str, Any]],
-    reusable_components: list[dict[str, Any]],
-    global_summary: dict[str, Any],
-    model: str,
-) -> dict[str, Any]:
-    print(f"[planner] Stratégie: chunking ({len(chunks)} chunks)")
+def _parse_llm_json(raw_text: str) -> dict:
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        cleaned = "\n".join(lines)
+    return json.loads(cleaned)
 
-    partial_plannings: list[dict[str, Any]] = []
-    cumulative_summary: dict[str, Any] | None = None
 
-    for i, chunk in enumerate(chunks, start=1):
-        print(f"[planner] Chunk {i}/{len(chunks)} (scope: {chunk.get('chunk_scope', '?')})")
+def _build_user_prompt(planner_input: dict[str, Any]) -> str:
+    chunks = planner_input.get("chunks", [])
+    stats = planner_input.get("stats", {})
+    parts = []
+    parts.append("## Project Stats")
+    parts.append(json.dumps(stats, indent=2))
+    parts.append("\n## Design Structure")
+    for i, chunk in enumerate(chunks):
+        if len(chunks) > 1:
+            parts.append(f"\n### Chunk {i + 1}")
+        if "canvases" in chunk:
+            parts.append(json.dumps(chunk["canvases"], indent=2))
+        elif "frame" in chunk:
+            parts.append(json.dumps(chunk["frame"], indent=2))
+    if chunks:
+        components = chunks[0].get("reusable_components", [])
+        if components:
+            parts.append("\n## Reusable Components Available")
+            parts.append(json.dumps(components, indent=2))
+    parts.append("\n## Task")
+    parts.append("Produce the generation plan JSON. ONLY valid JSON, nothing else.")
+    return "\n".join(parts)
 
-        current_chunk = chunk.get("current_chunk", chunk)
 
-        if i == 1:
-            prompt = build_first_chunk_prompt(
-                chunk=current_chunk,
-                reusable_components=reusable_components,
-                global_summary=global_summary,
-            )
-        else:
-            prompt = build_next_chunk_prompt(
-                chunk=current_chunk,
-                cumulative_summary=cumulative_summary or {},
-                reusable_components=reusable_components,
-                chunk_index=i,
-                total_chunks=len(chunks),
-            )
-
-        chain = _make_chain(prompt, model)
-        response = chain.invoke({})
-        partial = _extract_json_from_response(response)
-        partial = _normalize_planning(partial)
-        partial_plannings.append(partial)
-
-        if i < len(chunks):
-            print(f"[planner] Résumé cumulatif après chunk {i}...")
-            cumulative_summary = _summarize_partial(partial, model=model)
-
-    print("[planner] Fusion des plannings partiels...")
-    return _merge_plannings(partial_plannings, model)
+def _validate_planning(planning: dict) -> dict:
+    if "pages" not in planning:
+        raise ValueError("Planning manque 'pages'")
+    if "generation_order" not in planning:
+        raise ValueError("Planning manque 'generation_order'")
+    for page in planning["pages"]:
+        if "page_name" not in page:
+            raise ValueError(f"Page sans 'page_name': {page}")
+        if "sections" not in page:
+            raise ValueError(f"Page '{page.get('page_name')}' sans 'sections'")
+    return planning
 
 
 def generate_planning(
-    payload: dict[str, Any],
-    chunks: list[dict[str, Any]] | None,
-    global_summary: dict[str, Any],
-    use_large_model: bool = False,
+    planner_input: dict[str, Any],
+    output_path: Path = PLANNER_PLANNING_FILE,
 ) -> dict[str, Any]:
-    model = MODELS["large"] if use_large_model else MODELS["default"]
-    reusable_components = payload.get("reusable_components", [])
+    print("[planner] Construction du prompt...")
+    user_prompt = _build_user_prompt(planner_input)
+    print(f"[planner] Taille du prompt : {len(user_prompt)} caractères")
 
-    print(f"[planner] Démarrage génération planning (modèle: {model})")
+    # Retry si JSON malformé
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            print(f"[planner] Appel LLM (tentative {attempt}/{MAX_RETRIES})...")
+            raw_response = _call_llm(SYSTEM_PROMPT, user_prompt)
+            planning = _parse_llm_json(raw_response)
+            planning = _validate_planning(planning)
+            break  # Succès
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"[planner] ⚠️ Erreur parsing/validation : {e}")
+            if attempt == MAX_RETRIES:
+                raise RuntimeError(f"Le LLM n'a pas retourné de JSON valide après {MAX_RETRIES} tentatives.") from e
+            print(f"[planner] Retry dans 2 secondes...")
+            time.sleep(2)
 
-    if not chunks:
-        planning = _run_single_call(payload, model)
-    else:
-        planning = _run_chunked_calls(
-            chunks=chunks,
-            reusable_components=reusable_components,
-            global_summary=global_summary,
-            model=model,
-        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(planning, f, ensure_ascii=False, indent=2)
 
-    print(
-        f"[planner] Planning généré : "
-        f"{len(planning.get('files', []))} fichiers, "
-        f"{len(planning.get('folders', []))} dossiers"
-    )
+    print(f"[planner] Planning : {len(planning['pages'])} pages, "
+          f"{len(planning.get('shared_sections', []))} shared, "
+          f"{len(planning['generation_order'])} étapes")
+    print(f"[planner] Sauvegardé -> {output_path}")
     return planning

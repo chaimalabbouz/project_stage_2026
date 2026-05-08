@@ -220,115 +220,82 @@ def _clean_style_override_table(table: Any) -> dict:
 # ---------------------------------------------------------------------------
 # Nettoyage d'un nœud Figma
 # ---------------------------------------------------------------------------
-
 def _clean_node(node: dict) -> dict:
-    """
-    Nettoie un nœud Figma en gardant uniquement les informations
-    nécessaires pour générer du code React + Tailwind.
-    """
     node_type = node.get("type", "")
 
-    cleaned = {
-        "id": node.get("id"),
-        "name": node.get("name"),
-        "type": node_type,
-    }
+    cleaned = {}
 
-    # Champs génériques
+    # 1. Champs génériques
     for key in USEFUL_GENERIC_FIELDS:
-        if key in node and key not in ("id", "name", "type"):
+        if key in node:
             cleaned[key] = node[key]
 
-    # Layout (flex, padding, gap, etc.)
+    # 2. Layout (conditionné aux types layout)
     if node_type in LAYOUT_TYPES:
         for key in FIELDS_LAYOUT:
             if key in node:
                 cleaned[key] = node[key]
 
-    # Dimensions et position
+    # 3. Bounds (dimensions et positionnement)
     for key in BOUNDS_FIELDS:
         if key in node:
             cleaned[key] = node[key]
 
-    # Texte
-    if node_type == "TEXT":
-        if "characters" in node:
-            cleaned["characters"] = node["characters"]
-
-        if "style" in node:
-            style = _clean_text_style(node["style"])
-            if style:
-                cleaned["style"] = style
-
-        overridden_fields = node.get("overriddenFields", [])
-
-        has_style_overrides = (
-            "characterStyleOverrides" in node
-            and isinstance(node["characterStyleOverrides"], list)
-            and len(node["characterStyleOverrides"]) > 0
-            and "characterStyleOverrides" in overridden_fields
-        )
-
-        has_override_table = (
-            "styleOverrideTable" in node
-            and isinstance(node["styleOverrideTable"], dict)
-            and len(node["styleOverrideTable"]) > 0
-            and "styleOverrideTable" in overridden_fields
-        )
-
-        if has_style_overrides:
-            cleaned["characterStyleOverrides"] = node["characterStyleOverrides"]
-
-        if has_override_table:
-            table = _clean_style_override_table(node["styleOverrideTable"])
-            if table:
-                cleaned["styleOverrideTable"] = table
-
-        if overridden_fields:
-            relevant = [
-                f for f in overridden_fields
-                if f in ("characterStyleOverrides", "styleOverrideTable", "characters")
-            ]
-            if relevant:
-                cleaned["overriddenFields"] = relevant
-
-    # Fills, strokes, effects
-    if "fills" in node:
-        fills = _clean_paint_list(node["fills"])
-        if fills:
-            cleaned["fills"] = fills
-
-    if "strokes" in node:
-        strokes = _clean_paint_list(node["strokes"])
-        if strokes:
-            cleaned["strokes"] = strokes
-
-    if "effects" in node:
-        effects = _clean_effects(node["effects"])
-        if effects:
-            cleaned["effects"] = effects
-
-    # Autres propriétés visuelles
+    # 4. Style (opacité, bordures, coins, background)
     for key in STYLE_FIELDS:
         if key in node:
             cleaned[key] = node[key]
 
-    # Images
+    # 5. Image
     for key in IMAGE_FIELDS:
         if key in node:
             cleaned[key] = node[key]
 
-    # Récursion sur les enfants
+    # 6. Fills
+    fills = _clean_paint_list(node.get("fills", []))
+    if fills:
+        cleaned["fills"] = fills
+
+    # 7. Strokes
+    strokes = _clean_paint_list(node.get("strokes", []))
+    if strokes:
+        cleaned["strokes"] = strokes
+
+    # 8. Effects (ombres, blur)
+    effects = _clean_effects(node.get("effects", []))
+    if effects:
+        cleaned["effects"] = effects
+
+    # 9. Texte
+    if node_type == "TEXT":
+        if "characters" in node:
+            cleaned["characters"] = node["characters"]
+        if "characterStyleOverrides" in node:
+            cleaned["characterStyleOverrides"] = node["characterStyleOverrides"]
+
+        style = _clean_text_style(node.get("style", {}))
+        if style:
+            cleaned["style"] = style
+
+        overrides = _clean_style_override_table(node.get("styleOverrideTable", {}))
+        if overrides:
+            cleaned["styleOverrideTable"] = overrides
+
+    # 10. Récursion sur les enfants
     if "children" in node and isinstance(node["children"], list):
-        cleaned_children = [
+        cleaned["children"] = [
             _clean_node(child)
             for child in node["children"]
             if isinstance(child, dict)
         ]
-        if cleaned_children:
-            cleaned["children"] = cleaned_children
 
+    # 11. Pruning final
     return _prune_empty(cleaned)
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -379,21 +346,10 @@ def _scan_components(
     component_sets: dict[str, dict],
     inside_set_id: str | None = None,
 ) -> None:
-    """
-    Parcourt récursivement le canvas composants et collecte :
-      - Les COMPONENT_SET (groupes de variants) avec leurs props
-      - Les COMPONENT individuels avec leur définition visuelle
-
-    Le paramètre inside_set_id permet de savoir si on est en train
-    de parcourir les enfants d'un COMPONENT_SET. Si c'est le cas,
-    les COMPONENT trouvés sont des VARIANTS (pas des standalone).
-    On les marque avec _parent_set_id pour le groupement ultérieur.
-    """
     node_type = node.get("type", "")
     node_id = node.get("id")
 
     if node_type == "COMPONENT_SET" and node_id:
-        # Un COMPONENT_SET contient les props globales du groupe de variants
         raw_props = node.get("componentPropertyDefinitions", {})
         clean_props = _clean_prop_definitions(raw_props) if raw_props else {}
 
@@ -403,36 +359,42 @@ def _scan_components(
             "props": clean_props,
         }
 
-        # Les enfants directs d'un COMPONENT_SET sont ses variants
-        # On passe inside_set_id pour les marquer
         for child in node.get("children", []):
             if isinstance(child, dict):
                 _scan_components(child, components, component_sets, inside_set_id=node_id)
         return
 
     if node_type == "COMPONENT" and node_id:
-        # Props propres au composant
         raw_props = node.get("componentPropertyDefinitions", {})
         clean_props = _clean_prop_definitions(raw_props) if raw_props else {}
+
+        # ===================== AJOUT =====================
+        # On passe le nœud COMPONENT lui-même dans _clean_node
+        # pour récupérer ses styles globaux (fills, effects,
+        # layout, padding, size, cornerRadius, opacity, etc.)
+        root_style = _clean_node(node)
+        # On retire ce qui est déjà stocké séparément ou inutile ici
+        root_style.pop("children", None)   # les children sont déjà en dessous
+        root_style.pop("id", None)         # déjà stocké comme "id"
+        root_style.pop("name", None)       # déjà stocké comme "name"
+        root_style.pop("type", None)       # pas besoin ici
+        root_style.pop("componentId", None) # évite les interférences
+        # ================ FIN DE L'AJOUT =================
 
         components[node_id] = {
             "id": node_id,
             "name": node.get("name"),
             "props": clean_props,
+            "root_style": root_style,       # ← AJOUT : les styles globaux du composant
             "children": [
                 _clean_node(child)
                 for child in node.get("children", [])
                 if isinstance(child, dict)
             ],
-            # Marqueur interne : si ce composant est dans un COMPONENT_SET
-            # on le sait directement, sans dépendre du metadata
             "_parent_set_id": inside_set_id,
         }
         return
 
-    # Pour les autres types (FRAME, SECTION, GROUP...) : continuer la récursion
-    # On ne propage PAS inside_set_id car seuls les enfants directs
-    # d'un COMPONENT_SET sont des variants
     for child in node.get("children", []):
         if isinstance(child, dict):
             _scan_components(child, components, component_sets)
@@ -535,6 +497,7 @@ def _group_components(
             "definition": {
                 "id": comp_data["id"],
                 "name": comp_data["name"],
+                "root_style": comp_data.get("root_style", {}),   # ← AJOUT
                 "props": comp_data.get("props", {}),
                 "children": comp_data.get("children", []),
             },
@@ -552,6 +515,7 @@ def _group_components(
             "definition": {
                 "id": comp["id"],
                 "name": comp["name"],
+                "root_style": comp.get("root_style", {}), 
                 "children": comp.get("children", []),
             },
         })

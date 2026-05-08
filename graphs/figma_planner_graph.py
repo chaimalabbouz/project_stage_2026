@@ -15,9 +15,9 @@ from config.settings import (
     RAW_OUTPUT_FILE,
     CLEANED_OUTPUT_FILE,
     COMPONENT_REU_OUTPUT_FILE,
-    PLANNER_PAYLOAD_FILE,
-    PLANNER_SUMMARY_FILE,
-    PLANNER_CHUNKS_FILE,
+    PLANNER_INPUT_FILE,
+    
+    
     PLANNER_PLANNING_FILE,
     PLANNER_MAX_DEPTH,
     PLANNER_MAX_CHARS_SINGLE_CALL,
@@ -29,21 +29,22 @@ from services.figma.fetcher import fetch_figma_file, save_raw
 from services.figma.canvas_filter import filter_canvases
 from services.figma.cleaner import clean_tree
 from services.figma.component_reu import extract_reusable_components
-from services.planner.payload_builder import build_planner_payload
-from services.planner.size_estimator import estimate_json_size
-from services.planner.summary_builder import build_global_summary
-from services.planner.chunking import build_structural_chunks
+from services.planner.planner_input_builder import build_planner_input
+
 from llm.planner import generate_planning
 
 
 # Imports des nouvelles étapes
-from services.figma.style_converter import style_converter_node
-from services.figma.route_mapper import route_mapper_node 
-from agents.generator.scaffolder import scaffold_project_node
-from agents.codegen_agent.node import codegen_node
-#from agents.validation_agent.node import validation_node
+#from services.figma.style_converter import style_converter_node
+#from services.figma.route_mapper import route_mapper_node 
 
 
+
+
+
+
+#from agents.codegen_agent import scaffold_project_node, codegen_runner_node
+#from agents.validation_agent import validation_agent_node
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -122,119 +123,119 @@ def extract_reusable_components_node(state: PlannerGraphState) -> dict[str, Any]
 # Phase 2 : Construction du payload et stratégie
 # ---------------------------------------------------------------------------
 
-def build_planner_payload_node(state: PlannerGraphState) -> dict[str, Any]:
-    payload = build_planner_payload(
-        cleaned_json=state["cleaned_json"],
-        reusable_components_data=state["reusable_components"],
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+ 
+def _save_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+ 
+ 
+def _append_log(state, message: str) -> list[str]:
+    logs = list(state.get("logs", []))
+    logs.append(message)
+    return logs
+ 
+ 
+# ---------------------------------------------------------------------------
+# Nœud 1 : Construire l'input du LLM de planning
+# ---------------------------------------------------------------------------
+ 
+def build_planner_input_node(state: dict[str, Any]) -> dict[str, Any]:
+    """
+    Lit le JSON nettoyé + les composants réutilisables,
+    construit le payload pour le LLM de planning,
+    découpe en chunks si nécessaire.
+    """
+    # Lire le JSON nettoyé depuis le fichier
+    with open(CLEANED_OUTPUT_FILE, "r", encoding="utf-8") as f:
+        cleaned_json = json.load(f)
+ 
+    # Les composants réutilisables sont déjà dans le state
+    reusable_data = state["reusable_components"]
+ 
+    # Construire l'input (chunking inclus)
+    planner_input = build_planner_input(
+        cleaned_json=cleaned_json,
+        reusable_data=reusable_data,
         max_depth=PLANNER_MAX_DEPTH,
-    )
-    _save_json(PLANNER_PAYLOAD_FILE, payload)
-    return {
-        "planner_payload": payload,
-        "logs": _append_log(state, f"[graph] payload sauvegardé -> {PLANNER_PAYLOAD_FILE}"),
-    }
-
-
-def estimate_payload_size_node(state: PlannerGraphState) -> dict[str, Any]:
-    size = estimate_json_size(state["planner_payload"])
-    return {
-        "planner_payload_chars": size["chars"],                                                    
-        "planner_payload_estimated_tokens": size["estimated_tokens"],
-        "logs": _append_log(
-            state,
-            f"[graph] taille payload = {size['chars']} chars (~{size['estimated_tokens']} tokens)",
-        ),
-    }
-
-
-def build_summary_node(state: PlannerGraphState) -> dict[str, Any]:
-    summary = build_global_summary(state["planner_payload"])
-    _save_json(PLANNER_SUMMARY_FILE, summary)
-    return {
-        "planner_summary": summary,
-        "logs": _append_log(state, f"[graph] summary sauvegardé -> {PLANNER_SUMMARY_FILE}"),
-    }
-
-
-def choose_strategy_node(state: PlannerGraphState) -> dict[str, Any]:
-    chars = state["planner_payload_chars"]
-
-    if chars <= PLANNER_MAX_CHARS_SINGLE_CALL:
-        return {
-            "chunk_strategy": "single_call",
-            "large_model_required": False,
-            "logs": _append_log(state, f"[graph] stratégie = single_call ({chars} chars)"),
-        }
-
-    return {
-        "chunk_strategy": "chunk_by_canvas_or_frame",
-        "large_model_required": False,
-        "logs": _append_log(state, f"[graph] stratégie = chunking ({chars} chars)"),
-    }
-
-
-def choose_strategy_router(
-    state: PlannerGraphState,
-) -> Literal["single_call", "chunk_by_canvas_or_frame"]:
-    return state["chunk_strategy"]
-
-
-def build_chunks_node(state: PlannerGraphState) -> dict[str, Any]:
-    chunks = build_structural_chunks(
-        planner_payload=state["planner_payload"],
-        global_summary=state["planner_summary"],
         max_chars_per_chunk=PLANNER_MAX_CHARS_PER_CHUNK,
     )
-
-    chunk_count = len(chunks)
-    _save_json(PLANNER_CHUNKS_FILE, chunks)
-
+ 
+    # Sauvegarder
+    _save_json(PLANNER_INPUT_FILE, planner_input)
+ 
+    # Stats pour le log
+    stats = planner_input["stats"]
+    chunk_count = planner_input["total_chunks"]
+ 
+    return {
+        "planner_input": planner_input,
+        "logs": _append_log(
+            state,
+            f"[graph] planner input construit : "
+            f"{stats['total_pages']} pages, "
+            f"{chunk_count} chunk(s), "
+            f"sauvegardé -> {PLANNER_INPUT_FILE}",
+        ),
+    }
+ 
+ 
+# ---------------------------------------------------------------------------
+# Nœud 2 : Vérifier la faisabilité (trop de chunks ?)
+# ---------------------------------------------------------------------------
+ 
+def check_planner_feasibility_node(state: dict[str, Any]) -> dict[str, Any]:
+    """
+    Vérifie si le nombre de chunks est raisonnable pour le LLM.
+    Si trop de chunks → on flag pour utiliser un modèle à plus grand context.
+    """
+    planner_input = state["planner_input"]
+    chunk_count = planner_input["total_chunks"]
+ 
     if chunk_count > PLANNER_MAX_CHUNKS:
         return {
-            "planner_chunks": chunks,
-            "chunk_count": chunk_count,
-            "chunk_strategy": "large_model_required",
-            "large_model_required": True,
+            "planner_feasibility": "large_model_required",
             "logs": _append_log(
                 state,
-                f"[graph] {chunk_count} chunks → modèle large requis"
+                f"[graph] {chunk_count} chunks dépasse le max ({PLANNER_MAX_CHUNKS}) "
+                f"→ modèle large requis",
             ),
         }
-
+ 
     return {
-        "planner_chunks": chunks,
-        "chunk_count": chunk_count,
-        "large_model_required": False,
-        "logs": _append_log(state, f"[graph] {chunk_count} chunks -> {PLANNER_CHUNKS_FILE}"),
+        "planner_feasibility": "ready",
+        "logs": _append_log(
+            state,
+            f"[graph] {chunk_count} chunk(s) → prêt pour le LLM de planning",
+        ),
     }
-
+ 
+ 
+def planner_feasibility_router(
+    state: dict[str, Any],
+) -> Literal["ready", "large_model_required"]:
+    """Router conditionnel après check_planner_feasibility_node."""
+    return state["planner_feasibility"]
 
 # ---------------------------------------------------------------------------
 # Phase 3 : Génération LLM du Planning
 # ---------------------------------------------------------------------------
 
 def llm_generate_planning_node(state: PlannerGraphState) -> dict[str, Any]:
-    payload = state["planner_payload"]
-    summary = state.get("planner_summary", {})
-    chunks = state.get("planner_chunks")             
-    use_large = state.get("large_model_required", False)
+    planner_input = state["planner_input"]
 
-    chunks_to_send = chunks if state.get("chunk_strategy") != "single_call" else None
-
-    planning = generate_planning(
-        payload=payload,
-        chunks=chunks_to_send,
-        global_summary=summary,
-        use_large_model=use_large,
-    )
+    planning = generate_planning(planner_input=planner_input)
 
     return {
         "llm_planning": planning,
         "logs": _append_log(
             state,
-            f"[graph] Planning LLM généré : "
-            f"{len(planning.get('files', []))} fichiers, "
-            f"{len(planning.get('folders', []))} dossiers"
+            f"[graph] Planning généré : "
+            f"{len(planning.get('pages', []))} pages, "
+            f"{len(planning.get('generation_order', []))} étapes",
         ),
     }
 
@@ -261,27 +262,21 @@ def build_figma_planner_graph():
     builder.add_node("extract_reusable_components", extract_reusable_components_node)
 
     # --- Noeuds Phase 2 ---
-    builder.add_node("build_planner_payload", build_planner_payload_node)
-    builder.add_node("estimate_payload_size", estimate_payload_size_node)
-    builder.add_node("build_summary", build_summary_node)
-    builder.add_node("choose_strategy", choose_strategy_node)
-    builder.add_node("build_chunks", build_chunks_node)
+    builder.add_node("build_planner_input", build_planner_input_node)
+    builder.add_node("check_planner_feasibility", check_planner_feasibility_node)
 
     # --- Noeuds Phase 3 ---
     builder.add_node("llm_generate_planning", llm_generate_planning_node)
     builder.add_node("save_planning", save_planning_node)
 
     # --- Noeuds Phase 4 : Pré-traitement & Scaffolding ---
-    builder.add_node("apply_style_system", style_converter_node)
-    builder.add_node("map_routes", route_mapper_node)
-    builder.add_node("scaffold_project", scaffold_project_node) # Appelle le vrai scaffolder Vite
+    #builder.add_node("apply_style_system", style_converter_node)
+    #builder.add_node("map_routes", route_mapper_node)
+    
+    #builder.add_node("scaffold_project", scaffold_project_node)
+    #builder.add_node("codegen", codegen_runner_node)
+    #builder.add_node("validation", validation_agent_node)
 
-    # --- Noeuds Phase 5 : Intégration des Vrais Agents (Sous-graphes) ---
-    
-    
-    builder.add_node("codegen", codegen_node)
-    #builder.add_node("validation", validation_node)
-    
     
     
     
@@ -297,8 +292,22 @@ def build_figma_planner_graph():
     builder.add_edge("load_or_fetch_raw", "filter_canvases")
     builder.add_edge("filter_canvases", "clean_tree")
     builder.add_edge("clean_tree", "extract_reusable_components")
-    builder.add_edge("extract_reusable_components", "build_planner_payload")
-
+    builder.add_edge("extract_reusable_components", "build_planner_input")
+    builder.add_edge("build_planner_input", "check_planner_feasibility")
+    builder.add_conditional_edges(
+      "check_planner_feasibility",
+       planner_feasibility_router,
+       {
+           "ready": "llm_generate_planning",
+           "large_model_required": "llm_generate_planning", 
+        },
+    )  
+    #builder.add_edge("llm_generate_planning", "scaffold_project")
+    #builder.add_edge("scaffold_project", "codegen")
+    #builder.add_edge("codegen", "validation")
+    #builder.add_edge("validation", END)
+    #builder.add_edge("extract_reusable_components", "build_planner_payload")
+    """
     # --- Edges Phase 2 ---
     builder.add_edge("build_planner_payload", "estimate_payload_size")
     builder.add_edge("estimate_payload_size", "build_summary")
@@ -318,12 +327,18 @@ def build_figma_planner_graph():
     # --- Edges Phase 3, 4 & 5 (La ligne directrice finale) ---
     builder.add_edge("llm_generate_planning", "save_planning")
     #builder.add_edge("save_planning", "apply_style_system")
-    builder.add_edge("save_planning", "apply_style_system")
-    builder.add_edge("apply_style_system", "map_routes")
+    #builder.add_edge("save_planning", "apply_style_system")
+    #builder.add_edge("apply_style_system", "map_routes")
+
+    builder.add_edge("save_planning","map_routes" )
     builder.add_edge("map_routes", "scaffold_project")
-    builder.add_edge("scaffold_project", "codegen")
-    builder.add_edge("codegen", END)
-    #builder.add_edge("validation", END)
+    
+    builder.add_edge("scaffold_project", "analyste")
+    builder.add_edge("analyste", "architecte")
+# builder.add_edge("architecte", "extract_sections")
+# builder.add_edge("extract_sections", "generateur")
+    builder.add_edge("architecte", "generateur") # Si tu ne l'automatises pas, lance le script à la main avant
+    builder.add_edge("generateur", END)
 
     #builder.add_edge("apply_style_system", "map_routes")
     #builder.add_edge("map_routes", "scaffold_project")
@@ -337,7 +352,7 @@ def build_figma_planner_graph():
     
     # Fin du pipeline
     #builder.add_edge("validation_agent", END)
-
+"""
     return builder.compile()
 
 

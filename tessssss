@@ -1,0 +1,212 @@
+{
+          "kind": "section",
+          "order_index": 1,
+          "data": {
+            "type": "FRAME",
+            "id": "30:2010",
+            "name": "Hero Banner",
+            "children": [
+              {
+                "type": "RECTANGLE",
+                "id": "30:2011",
+                "name": "div 1",
+                "styles": {
+                  "width": 1440.0,
+                  "height": 540.0,
+                  "fills": [
+                    {
+                      "type": "IMAGE",
+                      "imageRef": "da9b50eb44f26d528ca68b3977f52ceeb04d336c",
+                      "scaleMode": "FILL"
+                    }
+                  ],
+                  "strokeWeight": 1.0,
+                  "strokeAlign": "INSIDE",
+                  "_position": {
+                    "top": 0.0,
+                    "left": 0.0
+                  }
+                }
+              },
+              {
+                "type": "FRAME",
+                "id": "30:2012",
+                "name": "Content",
+                "styles": {
+                  "width": 689.0,
+                  "height": 220.0,
+                  "layout": {
+                    "layoutMode": "VERTICAL",
+                    "layoutWrap": "NO_WRAP",
+                    "layoutSizingHorizontal": "HUG",
+                    "layoutSizingVertical": "HUG",
+                    "itemSpacing": 56.0
+                  },
+                  "strokeWeight": 1.0,
+                  "strokeAlign": "INSIDE",
+                  "_position": {
+                    "top": 135.0,
+                    "left": 135.0
+                  }
+                },
+                "children": [
+                  {
+                    "type": "FRAME",
+                    "id": "30:2013",
+                    "name": "Content-Text",
+                    "styles": {
+                      "width": 689.0,
+                      "height": 116.0,
+                      "layout": {
+                        "layoutMode": "VERTICAL",
+                        "counterAxisSizingMode": "FIXED",
+                        "layoutWrap": "NO_WRAP",
+                        "layoutAlign": "INHERIT",
+                        "layoutGrow": 0.0,
+                        "layoutSizingHorizontal": "FIXED",
+                        "layoutSizingVertical": "HUG",
+                        "itemSpacing": 8.0
+                      },
+                      "strokeWeight": 1.0,
+                      "strokeAlign": "INSIDE"
+                    },
+                    "children": [
+                      {
+                        "type": "TEXT",
+                        "id": "30:2014",
+                        "name": "Echo - Friendy Smile",
+                        "characters": "Echo - Friendy Smile",
+                        "styles": {
+                          "fontFamily": "Poppins",
+                          "fontPostScriptName": "Poppins-SemiBold",
+                          "fontWeight": 600,
+                          "fontSize": 52.0,
+                          "textAlignHorizontal": "LEFT",
+                          "textAlignVertical": "CENTER",
+                          "letterSpacing": 0.0,
+                          "lineHeightPx": 78.0,
+                          "lineHeightPercent": 100.0,
+                          "lineHeightPercentFontSize": 150.0,
+                          "lineHeightUnit": "PIXELS",
+                          "color": {
+                            "hex": "#121216",
+                            "rgb": {
+                              "r": 18,
+                              "g": 18,
+                              "b": 22
+                            },
+                            "alpha": 1.0
+                          },
+                          "width": 689.0,
+                          "height": 78.0
+                        }
+                      },
+                      {
+                        "type": "TEXT",
+                        "id": "30:2015",
+                        "name": "Transform Your Dental Routine with Eco-Friendly Toothbrushes",
+                        "characters": "Transform Your Dental Routine with Eco-Friendly Toothbrushes",
+                        "styles": {
+                          "fontFamily": "Poppins",
+                          "fontPostScriptName": "Poppins-Regular",
+                          "fontWeight": 400,
+                          "fontSize": 20.0,
+                          "textAlignHorizontal": "LEFT",
+                          "textAlignVertical": "CENTER",
+                          "letterSpacing": 0.0,
+                          "lineHeightPx": 30.0,
+                          "lineHeightPercent": 100.0,
+                          "lineHeightPercentFontSize": 150.0,
+                          "lineHeightUnit": "PIXELS",
+                          "color": {
+                            "hex": "#494961",
+                            "rgb": {
+                              "r": 73,
+                              "g": 73,
+                              "b": 97
+                            },
+                            "alpha": 1.0
+                          },
+                          "width": 689.0,
+                          "height": 30.0
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "__COMPONENT_PLACEHOLDER__",
+                    "react_component_name": "Buttons",
+                    "component_id": "23:1617",
+                    "props_values": {
+                      "sHOPNOW": "SHOP NOW"
+                    },
+                    "styles": {
+                      "width": 220.0,
+                      "height": 48.0,
+                      "layout": {
+                        "layoutSizingHorizontal": "FIXED",
+                        "layoutSizingVertical": "FIXED",
+                        "layoutGrow": 0.0,
+                        "layoutAlign": "INHERIT"
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
+            "styles": {
+              "_positioning": "absolute"
+            }
+          },
+          "nested_instances": [
+            {
+              "id": "30:2016",
+              "name": "Buttons",
+              "component_id": "23:1617",
+              "react_component_name": "Buttons",
+              "props_values": {
+                "sHOPNOW": "SHOP NOW"
+              }
+            }
+          ]
+        },
+
+
+
+
+
+
+
+
+
+
+
+restimonial
+{
+          "kind": "section",
+          "order_index": 6,
+          "data": {
+            "type": "FRAME",
+            "id": "39:2370",
+            "name": "Testimonials",
+            "styles": {
+              "width": 1440.0,
+              "height": 663.0,
+              "layout": {
+                "layoutMode": "VERTICAL",
+                "primaryAxisAlignItems": "CENTER",
+                "counterAxisAlignItems": "CENTER",
+                "primaryAxisSizingMode": "FIXED",
+                "counterAxisSizingMode": "FIXED",
+                "layoutWrap": "NO_WRAP",
+                "layoutSizingHorizontal": "FIXED",
+                "layoutSizingVertical": "FIXED",
+                "padding": {
+                  "paddingLeft": 8.0,
+                  "paddingRight": 8.0,
+                  "paddingTop": 8.0,
+                  "paddingBottom": 8.0
+                },
+                "itemSpacing": 8.0
+              },
+              "fills": [        
