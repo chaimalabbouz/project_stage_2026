@@ -318,6 +318,11 @@ def _clean_node(node: dict) -> dict:
         if key in node:
             cleaned[key] = node[key]
 
+    # Interactions (clics, navigations, scroll...)   ← AJOUT ICI
+    if "interactions" in node and isinstance(node["interactions"], list):
+        if node["interactions"]:
+            cleaned["interactions"] = node["interactions"]        
+
     # Récursion sur les enfants
     if "children" in node and isinstance(node["children"], list):
         cleaned_children = [

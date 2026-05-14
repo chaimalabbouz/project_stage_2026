@@ -7,10 +7,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+FIGMA_API_KEY = os.getenv("FIGMA_API_KEY", "")
+FIGMA_FILE_KEY = os.getenv("FIGMA_FILE_ID", "")
+
+
 MODEL ="llama-3.3-70b-versatile"
-
-
+CODESTRAL_MODEL = "codestral-latest"
 
 
 # Inputs existants
@@ -38,3 +41,4 @@ COMPONENTS_DIR = PROJECT_DIR / "src" / "components"
 PAGES_DIR = PROJECT_DIR / "src" / "pages"
 
 ASSETS_DIR = PROJECT_DIR / "src" / "assets"
+ICONS_OUTPUT_FILE = DATA2_DIR / "extracted" / "icons.json"

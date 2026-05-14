@@ -22,256 +22,133 @@ OUTPUTS :
   - OUTPUT_DIR/my-app/src/components/*.tsx
   - OUTPUT_DIR/my-app/src/pages/*.tsx
 
-Modèle utilisé : Qwen3-32B sur Groq (mode non-thinking pour éviter
-le raisonnement dans la sortie).
+
 """
 
 import json
 import time
 import re
-from generator.style_converter import apply_styles_to_skeleton
+
 from pathlib import Path
-from langchain_groq import ChatGroq
+from langchain_mistralai import ChatMistralAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from config.settings import (
-    GROQ_API_KEY,
+    
     ARCHITECTURE_FILE,
     SECTIONS_OUTPUT_FILE,
     OUTPUT_DIR,
+    MISTRAL_API_KEY,
+    CODESTRAL_MODEL,
 )
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
 
-QWEN_MODEL = "llama-3.3-70b-versatile"
+
 
 PROJECT_DIR = OUTPUT_DIR / "my-app"
 COMPONENTS_DIR = PROJECT_DIR / "src" / "components"
 PAGES_DIR = PROJECT_DIR / "src" / "pages"
 
 LLM_DELAY = 45
-MAX_TOKENS_STRUCTURE = 5000
-MAX_TOKENS_STYLE = 5000
 
-# Suffixe ajouté à TOUS les system prompts pour désactiver le mode thinking
-# de Qwen3. Sans ça, le modèle inclut un bloc <think>...</think> dans sa
-# réponse, ce qui pollue le code généré.
-NO_THINK_SUFFIX = "\n\n/no_think"
+
 
 
 # ═══════════════════════════════════════════════════════════════
 # PROMPT LLM #1 — SQUELETTE JSX (composants réutilisables)
 # ═══════════════════════════════════════════════════════════════
 
-STRUCTURE_SYSTEM_PROMPT = """
-Tu es un expert React TypeScript.
-Ton UNIQUE rôle est de générer la STRUCTURE JSX d un composant — sans styles.
+SYSTEM_PROMPT = """
+Tu es un expert React + TypeScript + Tailwind CSS.
 
-Tu reçois :
-- name : le nom exact du composant React
-- kind : "standalone" ou "variant_set"
-- props : la liste des props (name, figma_name, type, default, source)
-- layout : "vertical" | "horizontal" | "grid" | "none"
-- children_structure : description sémantique ordonnée des éléments
-- children_tree : l arbre hiérarchique des nœuds Figma (type, name, layoutMode, children).
-  Tu DOIS respecter cette hiérarchie dans ton JSX.
-  Chaque FRAME avec un layoutMode dans l arbre doit devenir un <div> conteneur.
-  Les enfants de ce FRAME doivent être imbriqués dedans.
-  Utilise children_tree pour la STRUCTURE, et children_structure pour le contexte sémantique.
-- imports : composants locaux et externes utilisés
-- nodes : dict des nœuds stylables (figma_name → type)
+Ton rôle : générer UN SEUL fichier de composant React fidèle au design Figma,
+en utilisant EXCLUSIVEMENT les données fournies dans le payload.
 
-Tu dois produire UNIQUEMENT le code TypeScript du composant, sans markdown,
-sans explication, sans bloc de code.
+RÈGLES :
+1. SOURCE UNIQUE DE VÉRITÉ : utilise UNIQUEMENT les données du payload.
+2. FIDÉLITÉ VISUELLE : Tailwind arbitraire (bg-[#hex], p-[Xpx], etc).
+3. STRUCTURE : respecte children_tree.
+4. PROPS : interface TypeScript exacte depuis le payload.
+5. IMPORTS : utilise imports.local (noms PropreCase).
+6. SORTIE : code .tsx pur, export default obligatoire.
+7. COMPOSANTS IMPORTÉS :
+Si component_usage existe, utilise STRICTEMENT props_mapping pour appeler les composants locaux.
 
-RÈGLES STRICTES :
-1. Utiliser EXACTEMENT les noms de props fournis (champ "name"), JAMAIS les renommer
-2. Toutes les className DOIVENT être VIDES : className=""
-3. Chaque élément JSX DOIT avoir data-fname="..." correspondant au figma_name
-   Pour la racine : data-fname="__root__"
-   Pour les autres : data-fname="figma_name_exact"
-4. Si une prop a source "image" (son nom finit par "Url"),
-   utiliser <img src={prop} alt="..." className="" data-fname="..." />
-5. Si une prop a source "text" (type string), afficher {propName}
-6. Si une prop est VARIANT (type union), NE PAS l afficher directement ;
-   elle sert au style conditionnel. Ajouter data-variant-{propName}={propName}
-   sur la racine.
-7. Interface Props : toutes les props avec ? (optionnelles) et valeurs par défaut
-8. Pour les imports locaux (imports.local) :
-   import NomComposant from './NomComposant';
-   et utiliser <NomComposant /> dans le JSX avec les props appropriées
-9a) Pour les imports externes représentant des icônes :
-- Utiliser react-icons si possible
-- Ne pas limiter à une liste fixe
-- Convertir le nom Figma en nom d’icône React valide (PascalCase)
-- Choisir automatiquement une librairie appropriée si évident (ex: md, fa, hi)
-- Exemple : "shopping_cart" → MdShoppingCart
+IMPORTANT :
+- Si props_mapping contient des props, passe uniquement ces props.
+- Si props_mapping est vide {}, appelle le composant sans aucune prop.
+- N'invente jamais de props comme className, text, label, children, style ou color.
+- Ne déduis jamais une prop depuis les styles Figma.
+- Le parent place le composant, mais ne modifie pas son API interne.
+8. IMPORT SANS PROPS :
+Si un composant local importé a props_mapping: {}, il doit être appelé sans props.
+Exemple : <IconLinkedin />
+Interdit : <IconLinkedin color={...} />, <IconLinkedin className={...} />
+9. VARIANTS :
+Quand un composant local importé possède une prop de type VARIANT dans component_usage.props_mapping,
+passe cette prop au composant enfant avec la valeur exacte donnée.
 
-9b) Si l’icône n’est pas identifiable avec confiance :
-- Ne pas inventer une icône
-- Générer un <div className="" data-fname="...">
-10. export default function NomComposant(...)
-11. Pas d import React nécessaire
-12. Le JSX doit refléter la hiérarchie décrite dans children_structure
-13. NE JAMAIS retourner "return null" ni un composant vide.
-    Même si le composant semble simple (une seule image), génère le JSX complet.
-    Un composant avec une seule prop image doit au minimum retourner :
-    <div className="" data-fname="__root__">
-      <img src={imageUrl} alt="" className="" data-fname="nom-du-noeud-image" />
-    </div>
-14. HIÉRARCHIE OBLIGATOIRE : si children_tree contient des FRAME imbriqués,
-    tu DOIS créer des <div> imbriqués correspondants avec data-fname="nom-du-frame".
-    Ne JAMAIS aplatir la structure. Un FRAME enfant d un autre FRAME = un <div> dans un <div>.
-15. Tu DOIS générer un élément JSX pour CHAQUE nœud dans children_tree, sans exception.
-    Ne jamais ignorer un nœud, même s il semble décoratif (VECTOR, RECTANGLE sans image).
-    Un VECTOR → <div>, un RECTANGLE sans image → <div>.
-EXEMPLE — composant avec hiérarchie (children_tree) :
+Exemple :
+props_mapping: { "color": "White" }
+=> <SocialButton color="White" />
 
-Input :
-{
-  "name": "Testimonial",
-  "kind": "standalone",
-  "props": [
-    {"name": "text", "figma_name": "review-text", "type": "string", "default": "Great product!", "source": "text"},
-    {"name": "name", "figma_name": "user-name", "type": "string", "default": "John", "source": "text"},
-    {"name": "role", "figma_name": "user-role", "type": "string", "default": "Customer", "source": "text"},
-    {"name": "avatarUrl", "figma_name": "avatar", "type": "string", "default": "", "source": "image"}
-  ],
-  "layout": "vertical",
-  "children_structure": ["Texte avis", "Section client avec avatar et infos"],
-  "children_tree": {
-    "name": "Testimonial",
-    "layoutMode": "VERTICAL",
-    "children": [
-      {"type": "TEXT", "name": "review-text"},
-      {"type": "FRAME", "name": "Customer", "layoutMode": "HORIZONTAL", "children": [
-        {"type": "RECTANGLE", "name": "avatar", "hasImageFill": true},
-        {"type": "FRAME", "name": "Info", "layoutMode": "VERTICAL", "children": [
-          {"type": "TEXT", "name": "user-name"},
-          {"type": "TEXT", "name": "user-role"}
-        ]}
-      ]}
-    ]
-  },
-  "imports": {"local": [], "external": []},
-  "nodes": {"review-text": {"type": "TEXT"}, "Customer": {"type": "FRAME"}, "avatar": {"type": "RECTANGLE"}, "Info": {"type": "FRAME"}, "user-name": {"type": "TEXT"}, "user-role": {"type": "TEXT"}}
-}
+Si props_mapping est vide {}, appelle le composant sans props.
 
-Output :
-interface TestimonialProps {
-  text?: string;
-  name?: string;
-  role?: string;
-  avatarUrl?: string;
-}
+Ne transmets jamais une variante à un sous-enfant.
+Ne transforme jamais une couleur, un style ou un fill Figma en prop React si ce n'est pas dans props_mapping.
+10. INSTANCE LOCALE = COMPOSANT ATOMIQUE :
+Quand un noeud children_tree est une INSTANCE correspondant à un composant local importé,
+tu dois le rendre comme un composant React autonome.
 
-export default function Testimonial({ text = "Great product!", name = "John", role = "Customer", avatarUrl = "" }: TestimonialProps) {
-  return (
-    <div className="" data-fname="__root__">
-      <p className="" data-fname="review-text">{text}</p>
-      <div className="" data-fname="Customer">
-        <img src={avatarUrl} alt={name} className="" data-fname="avatar" />
-        <div className="" data-fname="Info">
-          <span className="" data-fname="user-name">{name}</span>
-          <span className="" data-fname="user-role">{role}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-""".strip() + NO_THINK_SUFFIX
+N'utilise JAMAIS ses children Figma comme children JSX.
+Exemple correct :
+<SocialButton color="White" />
+
+Exemple interdit :
+<SocialButton color="White">
+  <IconLinkedin />
+</SocialButton>
+
+Les children internes d'une INSTANCE locale appartiennent déjà au composant importé.
+Le parent doit seulement placer l'instance et lui passer les props_mapping.
+11. IMPORTS :
+imports.local est une donnée JSON, pas un chemin.
+
+Toujours utiliser :
+import ComponentName from './ComponentName';
+
+Jamais :
+import ... from 'imports.local/...';
+
+Importer seulement les composants utilisés directement dans le fichier.
+Ne pas importer les enfants internes d'un composant.
+12. INTERACTIONS :
+Si "interactions" existe dans le payload :
+- Si interactions.root n'est pas vide → ajouter une prop `onClick?: () => void` 
+  à l'interface, et la mettre sur l'élément racine du composant.
+- Si interactions.nodes contient des entrées → ajouter une prop optionnelle 
+  `on<NomDuNoeud>Click?: () => void` pour chaque clé, et la mettre 
+  sur l'élément correspondant.
+
+Exemple si interactions.nodes = {"Projects": [...], "Resume": [...]} :
+  Props : onProjectsClick?: () => void; onResumeClick?: () => void;
+  Usage : <span onClick={onProjectsClick}>...</span>
+          <span onClick={onResumeClick}>...</span>
+
+Ne PAS hardcoder de navigation ou route. Juste exposer les props.
+IMPORTANT : Si une clé de interactions.nodes correspond à une INSTANCE 
+de composant local importé (Button, Card, etc.), il faut :
+- exposer la prop `on<Nom>Click?: () => void`
+- la passer au composant via sa prop onClick
+
+Exemple si interactions.nodes = {"Button": [...]} :
+  Props : onButtonClick?: () => void;
+  Usage : <Button ... onClick={onButtonClick} />
+""".strip()
 
 
-# ═══════════════════════════════════════════════════════════════
-# PROMPT LLM #2 — STYLES TAILWIND
-# ═══════════════════════════════════════════════════════════════
-
-STYLE_SYSTEM_PROMPT = """
-Tu es un expert Tailwind CSS.
-Tu reçois du code React TypeScript avec des className DÉJÀ PRÉ-REMPLIS
-par un système automatique, et des data-fname="...".
-Tu reçois aussi les styles Figma bruts (root_styles + nodes_styles).
-
-Ton rôle est de VÉRIFIER et COMPLÉTER les className existants :
-1. VÉRIFIER que les classes pré-remplies sont correctes
-2. COMPLÉTER si des styles Figma n ont pas été convertis
-3. CORRIGER si des classes sont erronées ou manquantes
-4. Gérer les cas complexes (variants clsx, responsive, cas ambigus)
-Ne SUPPRIME PAS les classes existantes sauf si elles sont fausses.
-Si tout est correct, retourne le code INCHANGÉ.
-
-RÉFÉRENCE des mappings Tailwind (pour vérification) :
-
-LAYOUT :
-  layoutMode VERTICAL -> flex flex-col
-  layoutMode HORIZONTAL -> flex flex-row
-  primaryAxisAlignItems CENTER -> justify-center
-  primaryAxisAlignItems SPACE_BETWEEN -> justify-between
-  primaryAxisAlignItems MAX -> justify-end
-  primaryAxisAlignItems MIN -> justify-start
-  counterAxisAlignItems CENTER -> items-center
-  counterAxisAlignItems MIN -> items-start
-  counterAxisAlignItems MAX -> items-end
-  itemSpacing N -> gap-[Npx]
-  layoutWrap WRAP -> flex-wrap
-
-PADDING :
-  Si les 4 côtés sont égaux -> p-[Npx]
-  Si left=right ET top=bottom -> px-[Lpx] py-[Tpx]
-  Sinon -> pl-[Lpx] pr-[Rpx] pt-[Tpx] pb-[Bpx]
-
-SIZING :
-  layoutSizingHorizontal FILL -> w-full
-  layoutSizingHorizontal HUG -> w-fit
-  layoutSizingHorizontal FIXED + width -> w-[Wpx]
-  layoutSizingVertical FILL -> h-full
-  layoutSizingVertical HUG -> h-fit
-  layoutSizingVertical FIXED + height -> h-[Hpx]
-  layoutGrow 1 -> flex-1
-
-COULEURS :
-  fills SOLID avec visible != false -> bg-[#hex]
-  fills SOLID avec visible: false -> IGNORER
-  TEXT avec color.hex -> text-[#hex]
-
-TYPOGRAPHIE :
-  fontSize N -> text-[Npx]
-  fontWeight 400 -> font-normal
-  fontWeight 500 -> font-medium
-  fontWeight 600 -> font-semibold
-  fontWeight 700 -> font-bold
-  fontFamily "Nom" -> font-['Nom']
-  textAlignHorizontal CENTER -> text-center
-  lineHeightPx N -> leading-[Npx]
-  letterSpacing N (si != 0) -> tracking-[Npx]
-
-BORDURES :
-  cornerRadius N -> rounded-[Npx]
-  rectangleCornerRadii [TL,TR,BR,BL] -> rounded-tl-[TLpx] etc.
-  strokeWeight N + strokes SOLID visible -> border-[Npx] border-[#hex]
-
-EFFETS :
-  DROP_SHADOW -> shadow-[Xpx_Ypx_Rpx_rgba(r,g,b,A)]
-
-OPACITY :
-  opacity N (si != 1) -> opacity-[N]
-
-IMAGE :
-  fills IMAGE + scaleMode FILL -> object-cover
-  fills IMAGE + scaleMode FIT -> object-contain
-
-CLIPPING :
-  clipsContent true -> overflow-hidden
-
-VARIANT CONDITIONNEL (si styles_by_variant est fourni) :
-  Importer clsx en haut : import clsx from 'clsx';
-  Utiliser : className={clsx("classes-de-base", { "classe-variante": condition })}
-
-RAPPEL FINAL : Retourne UNIQUEMENT le code TypeScript modifié.
-Pas de markdown, pas de backticks, pas d explication, pas d analyse.
-Juste le code, rien d autre.
-""".strip() + NO_THINK_SUFFIX
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -352,59 +229,47 @@ Output :
   <h1 className="text-[48px] font-bold text-[#1a1a1a]">Welcome</h1>
   <Button label="Click me" />
 </div>
-""".strip() + NO_THINK_SUFFIX
+12. INTERACTIONS :
+Si "interactions" existe dans le payload :
+- Si interactions.root n'est pas vide → ajouter une prop `onClick?: () => void` 
+  à l'interface, et la mettre sur l'élément racine du composant.
+- Si interactions.nodes contient des entrées → ajouter une prop optionnelle 
+  `on<NomDuNoeud>Click?: () => void` pour chaque clé, et la mettre 
+  sur l'élément correspondant.
+
+Exemple si interactions.nodes = {"Projects": [...], "Resume": [...]} :
+  Props : onProjectsClick?: () => void; onResumeClick?: () => void;
+  Usage : <span onClick={onProjectsClick}>...</span>
+          <span onClick={onResumeClick}>...</span>
+
+Ne PAS hardcoder de navigation ou route. Juste exposer les props.
+""".strip()
 
 
 # ═══════════════════════════════════════════════════════════════
 # UTILS
 # ═══════════════════════════════════════════════════════════════
 
-def _call_llm(system_prompt: str, user_content: str, llm: ChatGroq,
-              max_tokens: int = 4096) -> str:
-    """Appel LLM avec retry sur rate-limit."""
-    messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_content),
-    ]
-
+def _call_llm(llm, system_prompt: str, user_content: str) -> str:
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_content)]
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            response = llm.invoke(messages, max_tokens=max_tokens)
-            raw = response.content.strip()
-
-            # Retirer les blocs <think>...</think> si Qwen3 les inclut malgré /no_think
-            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
-
-            # Retirer les fences markdown si le LLM en met
-            if raw.startswith("```"):
-                lines = raw.split("\n")
-                # Trouver la dernière ligne ```
-                end_idx = len(lines) - 1
-                for i in range(len(lines) - 1, 0, -1):
-                    if lines[i].strip().startswith("```"):
-                        end_idx = i
-                        break
-                raw = "\n".join(lines[1:end_idx]).strip()
-
+            response = llm.invoke(messages)
             time.sleep(LLM_DELAY)
-            return raw
+            return response.content
         except Exception as e:
-            if "429" in str(e) or "rate_limit" in str(e).lower():
-                wait_time = (attempt + 1) * 30
-                print(f"  [RATE LIMIT] Attente {wait_time}s ({attempt+1}/{max_retries})...")
-                time.sleep(wait_time)
+            err = str(e).lower()
+            if "429" in err or "rate" in err or "limit" in err:
+                wait = (attempt + 1) * 5
+                print(f"  [RATE LIMIT] Attente {wait}s ({attempt+1}/{max_retries})...")
+                time.sleep(wait)
             else:
-                raise e
+                raise
     raise RuntimeError("Rate limit : max retries atteint")
 
 
-def _remove_data_fname(code: str) -> str:
-    """Retire tous les data-fname="..." et data-variant-*={...} du code final."""
-    code = re.sub(r'\s+data-fname="[^"]*"', '', code)
-    code = re.sub(r'\s+data-fname=\{[^}]*\}', '', code)
-    code = re.sub(r'\s+data-variant-[a-zA-Z]+=\{[^}]*\}', '', code)
-    return code
+
 
 
 def _build_prop_string(key: str, value) -> str:
@@ -418,35 +283,226 @@ def _build_prop_string(key: str, value) -> str:
         return f'{key}="{safe_value}"'
 
 
-def _build_component_jsx(react_name: str, props_values: dict) -> str:
-    """Construit l'appel JSX d'un composant avec ses props."""
-    if not props_values:
-        return f"<{react_name} />"
+def _build_component_jsx(
+    react_name: str,
+    props_values: dict,
+    child_interactions: dict | None = None,
+    route_by_node_id: dict | None = None,
+) -> str:
+    """Construit l'appel JSX d'un composant avec ses props + interactions enfants."""
+    # ✅ NOUVEAU : sanitizer le nom au cas où il contient des espaces
+    react_name = _sanitize_component_name(react_name)
+    
     parts = [_build_prop_string(k, v) for k, v in props_values.items()]
+    
+    # Ajouter les props onXxxClick depuis child_interactions
+    if child_interactions and route_by_node_id is not None:
+        for figma_name, interactions in child_interactions.items():
+            handler = _build_onclick_handler(interactions, route_by_node_id)
+            if handler:
+                prop_name = _build_onclick_prop_name(figma_name)
+                parts.append(f"{prop_name}={{{handler}}}")
+    
+    if not parts:
+        return f"<{react_name} />"
     return f"<{react_name} {' '.join(parts)} />"
 
 
-def _ensure_imports(code: str) -> str:
-    """Ajoute import React et clsx si nécessaire."""
-    lines_to_add = []
-
-    if "import React" not in code and "from 'react'" not in code:
-        lines_to_add.append("import React from 'react';")
-
-    if "clsx(" in code and "import clsx" not in code:
-        lines_to_add.append("import clsx from 'clsx';")
-
-    if lines_to_add:
-        code = "\n".join(lines_to_add) + "\n\n" + code
-
-    return code
+def _build_onclick_prop_name(figma_name: str) -> str:
+    """Convertit 'Projects' → 'onProjectsClick', 'About me' → 'onAboutMeClick'."""
+    safe = _sanitize_component_name(figma_name)
+    return f"on{safe}Click"
 
 
-def _sanitize_component_name(name: str) -> str:
-    """Convertit un nom Figma en PascalCase valide pour un fichier/composant."""
-    parts = re.split(r'[^a-zA-Z0-9]+', name)
-    cleaned = "".join(p[0].upper() + p[1:] for p in parts if p)
-    return cleaned or "Component"
+def _build_onclick_handler(interactions: list, route_by_node_id: dict) -> str | None:
+    """Construit le handler JS depuis une liste d'interactions.
+    
+    Retourne par exemple : "() => navigate('/projects')" ou "() => navigate(-1)"
+    """
+    if not isinstance(interactions, list):
+        return None
+    
+    click_inter = next(
+        (i for i in interactions if i.get("trigger") == "ON_CLICK"),
+        None,
+    )
+    if not click_inter:
+        return None
+    
+    actions = click_inter.get("actions", [])
+    if not actions:
+        return None
+    
+    first = actions[0]
+    atype = first.get("type")
+    nav = first.get("navigation")
+    dest_id = first.get("destinationId")
+    
+    # NAVIGATE
+    if nav == "NAVIGATE" and dest_id:
+        route = route_by_node_id.get(dest_id)
+        if route:
+            return f"() => navigate('{route}')"
+        return None
+    
+    # SCROLL_TO
+    if nav == "SCROLL_TO" and dest_id:
+        html_id = _html_id_from_figma_id(dest_id)
+        return (
+            f'() => document.getElementById("{html_id}")'
+            f'?.scrollIntoView({{ behavior: "smooth" }})'
+        )
+    
+    # OVERLAY
+    if nav == "OVERLAY" and dest_id:
+        return f'() => setActiveOverlay("{dest_id}")'
+    
+    # BACK
+    if atype == "BACK":
+        return "() => navigate(-1)"
+    
+    return None
+
+
+
+
+
+def _sanitize_component_name(raw_name: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", " ", raw_name).strip()
+    parts = cleaned.split()
+    proper = "".join(p[0].upper() + p[1:] if p else "" for p in parts)
+    if proper and proper[0].isdigit():
+        proper = "C" + proper
+    return proper or "Component"
+
+
+
+def _sanitize_prop_name(raw_name: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", " ", raw_name).strip()
+    parts = cleaned.split()
+
+    if not parts:
+        return "prop"
+
+    first = parts[0].lower()
+    rest = [p[0].upper() + p[1:] for p in parts[1:]]
+
+    return first + "".join(rest)    
+
+def _extract_component_usage(component: dict) -> dict:
+    usage = {}
+
+    imports_local = component.get("imports", {}).get("local", [])
+    children_tree = component.get("architecture", {}).get("children_tree", {})
+
+    # Permet de matcher les noms Figma et les noms React sanitizés
+    imports_by_name = {}
+    for imp in imports_local:
+        name = imp.get("name", "")
+        imports_by_name[name] = imp
+        imports_by_name[_sanitize_component_name(name)] = imp
+
+    parent_props = component.get("architecture", {}).get("props", [])
+    parent_prop_names = [p.get("name") for p in parent_props]
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+
+        if node.get("type") == "INSTANCE":
+            instance_name = node.get("name", "")
+
+            matched_import = imports_by_name.get(instance_name) or imports_by_name.get(
+                _sanitize_component_name(instance_name)
+            )
+
+            if matched_import:
+                react_component_name = _sanitize_component_name(instance_name)
+                props_mapping = {}
+
+                # Figma variant props -> React props
+                for figma_prop, value in matched_import.get("props", {}).items():
+                    react_prop = _sanitize_prop_name(figma_prop)
+
+                    if isinstance(value, dict):
+                        default_value = value.get("default")
+                    else:
+                        default_value = value
+
+                    if default_value is not None:
+                        props_mapping[react_prop] = default_value
+
+                # Text children -> parent props
+                for child in node.get("children", []):
+                    if child.get("type") == "TEXT":
+                        text_name = child.get("name", "")
+                        react_prop = _sanitize_prop_name(text_name)
+
+                        if react_prop in parent_prop_names:
+                            props_mapping[react_prop] = f"{{{react_prop}}}"
+
+                usage_key = f"{react_component_name}_{len(usage)}"
+                usage[usage_key] = {
+                    "react_component": react_component_name,
+                    "figma_instance_name": instance_name,
+                    "props_mapping": props_mapping,
+                }
+                return
+
+        for child in node.get("children", []):
+            walk(child)
+
+    walk(children_tree)
+    return usage
+
+
+def _build_user_payload(component: dict, name_map: dict) -> str:
+    safe_component = json.loads(json.dumps(component, ensure_ascii=False))
+
+    raw_name = safe_component["name"]
+    safe_component["name"] = name_map.get(raw_name, _sanitize_component_name(raw_name))
+    safe_component["suggested_file"] = f"src/components/{safe_component['name']}.tsx"
+
+    imports = safe_component.get("imports", {})
+    for imp in imports.get("local", []):
+        original = imp.get("name", "")
+        imp["name"] = name_map.get(original, _sanitize_component_name(original))
+
+    payload = {
+      "name": safe_component["name"],
+      "kind": safe_component["kind"],
+      "suggested_file": safe_component["suggested_file"],
+      "architecture": safe_component["architecture"],
+      "styles": safe_component["styles"],
+      "interactions": safe_component.get("interactions", {}),  # ← AJOUT
+      "imports": safe_component.get("imports", {"local": [], "external": []}),
+      "component_usage": _extract_component_usage(safe_component),
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+def _clean_llm_code(raw: str) -> str:
+    raw = raw.strip()
+    fence_pattern = r"^```(?:tsx|jsx|typescript|javascript|ts|js)?\s*\n(.*?)\n```$"
+    match = re.match(fence_pattern, raw, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        if lines[-1].strip() == "```":
+            lines = lines[1:-1]
+        else:
+            lines = lines[1:]
+        return "\n".join(lines).strip()
+    return raw    
+
+
+
+
+
+
+
+
+
 
 
 def _sanitize_page_name(name: str) -> str:
@@ -460,62 +516,20 @@ def _sanitize_page_name(name: str) -> str:
 # GÉNÉRATION D'UN COMPOSANT RÉUTILISABLE (LLM #1 + LLM #2)
 # ═══════════════════════════════════════════════════════════════
 
-def _generate_component(arch_entry: dict, llm: ChatGroq) -> str:
-    """Génère le code d'un composant avec LLM #1 (structure) + styles déterministes."""
-    name = arch_entry["name"]
-    architecture = arch_entry.get("architecture", {})
-    styles = arch_entry.get("styles", {})
-    kind = arch_entry.get("kind", "standalone")
-    imports = arch_entry.get("imports", {"local": [], "external": []})
+def _generate_component(arch_entry: dict, llm: ChatMistralAI, name_map: dict) -> str:
+    payload_str = _build_user_payload(arch_entry, name_map)
+    user_message = f"Voici les données EXACTES :\n\n{payload_str}"
 
-    # ─── LLM #1 : STRUCTURE ───
-    structure_payload = {
-        "name": name,
-        "kind": kind,
-        "props": [
-            {
-                "name": p["name"],
-                "figma_name": p["figma_name"],
-                "type": p["type"],
-                "default": p.get("default", ""),
-                "source": p.get("source", "text"),
-            }
-            for p in architecture.get("props", [])
-        ],
-        "layout": architecture.get("layout", "none"),
-        "children_structure": architecture.get("children_structure", []),
-        "children_tree": architecture.get("children_tree", {}),
-        "imports": imports,
-        "nodes": {
-            figma_name: {"type": node_data.get("type", "FRAME")}
-            for figma_name, node_data in styles.get("nodes", {}).items()
-        },
-    }
+    raw = _call_llm(llm, SYSTEM_PROMPT, user_message)
+    code = _clean_llm_code(raw)
 
-    payload_str = json.dumps(structure_payload, ensure_ascii=False, indent=None)
-    print(f"  [LLM #1 structure] envoi {len(payload_str)} chars...")
+    if "export default" not in code:
+        raise RuntimeError("Code généré sans 'export default'")
 
-    jsx_skeleton = _call_llm(
-        STRUCTURE_SYSTEM_PROMPT,
-        f"Génère le composant '{name}' :\n\n{payload_str}",
-        llm,
-        max_tokens=MAX_TOKENS_STRUCTURE,
-    )
-
-    print(f"  [LLM #1 structure] reçu {len(jsx_skeleton)} chars")
-
-    # ─── ÉTAPE 2 : Styles déterministes ───
-    pre_styled = apply_styles_to_skeleton(jsx_skeleton, styles)
-    print(f"  [DETERMINISTIC] className pré-remplis")
-
-    # ─── Post-process Python ───
-    final_code = _remove_data_fname(pre_styled)
-    final_code = _ensure_imports(final_code)
-
-    return final_code
+    return code
 
 
-def _prepare_section_tree(section_data: dict) -> dict:
+def _prepare_section_tree(section_data: dict, route_by_node_id: dict | None = None) -> dict:
     """Prépare l'arbre de la section :
     - Remplace les __COMPONENT_PLACEHOLDER__ par leur jsx_call
     - Garde les styles, id et interactions à chaque nœud
@@ -523,13 +537,21 @@ def _prepare_section_tree(section_data: dict) -> dict:
     if not isinstance(section_data, dict):
         return section_data
 
+    route_by_node_id = route_by_node_id or {}
+
     if section_data.get("type") == "__COMPONENT_PLACEHOLDER__":
         react_name = section_data.get("react_component_name", "Component")
         props_values = section_data.get("props_values", {})
+        child_interactions = section_data.get("child_interactions", {})   # ✅ NOUVEAU
 
         result = {
             "type": "__COMPONENT_PLACEHOLDER__",
-            "jsx_call": _build_component_jsx(react_name, props_values),
+            "jsx_call": _build_component_jsx(
+                react_name,
+                props_values,
+                child_interactions=child_interactions,
+                route_by_node_id=route_by_node_id,
+            ),
         }
 
         for key in ("id", "styles", "interaction"):
@@ -546,7 +568,7 @@ def _prepare_section_tree(section_data: dict) -> dict:
 
     if "children" in section_data and isinstance(section_data["children"], list):
         cleaned["children"] = [
-            _prepare_section_tree(child)
+            _prepare_section_tree(child, route_by_node_id)   # ✅ propager
             for child in section_data["children"]
             if isinstance(child, dict)
         ]
@@ -572,7 +594,7 @@ def _generate_section_jsx(
     from generator.style_converter import generate_section_jsx_deterministic
 
     section_name = section_data.get("name", "Section")
-    section_tree = _prepare_section_tree(section_data)
+    section_tree = _prepare_section_tree(section_data, route_by_node_id)
 
     jsx = generate_section_jsx_deterministic(
         section_tree,
@@ -599,7 +621,7 @@ def _collect_all_used_components(sections_data: dict) -> set:
     return used
 
 
-def generate_components(architecture: dict, llm: ChatGroq) -> None:
+def generate_components(architecture: dict, llm: ChatMistralAI) -> None:
     """Génère les composants réutilisables dans l'ordre topologique."""
     print("\n[generateur] === Génération des composants ===")
     COMPONENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -621,6 +643,10 @@ def generate_components(architecture: dict, llm: ChatGroq) -> None:
     else:
         ordered_names = [c.get("name") for c in components if c.get("name")]
 
+    # Map des noms originaux Figma vers les noms React sanitizés
+    # Nécessaire pour _build_user_payload qui remplace les noms dans imports.local
+    name_map = {c["name"]: _sanitize_component_name(c["name"]) for c in components}
+
     generated = 0
     skipped = 0
 
@@ -633,7 +659,7 @@ def generate_components(architecture: dict, llm: ChatGroq) -> None:
 
         print(f"\n[generateur] Composant : {name}")
         try:
-            code = _generate_component(comp, llm)
+            code = _generate_component(comp, llm, name_map)
 
             # Nom de fichier sécurisé
             file_name = _sanitize_component_name(name)
@@ -660,34 +686,93 @@ def _html_id_from_figma_id(figma_id: str) -> str:
     return "figma-" + str(figma_id).replace(":", "-").replace(";", "-")
 
 
-def _wrap_with_interaction(jsx: str, interaction: dict | None, route_by_node_id: dict) -> str:
+def _wrap_with_interaction(jsx: str, interaction, route_by_node_id: dict) -> str:
+    """Enveloppe le JSX selon le nouveau format d'interactions.
+    
+    Format attendu (liste) :
+    [{"trigger": "ON_CLICK", "actions": [{"type": "...", "navigation": "...", "destinationId": "..."}]}]
+    """
     if not interaction:
         return jsx
-
-    if interaction.get("type") == "navigate":
-        target_id = interaction.get("target_node_id")
-        route = route_by_node_id.get(target_id)
-
+    
+    if not isinstance(interaction, list):
+        return jsx
+    
+    # Prendre la première interaction ON_CLICK
+    click_interaction = next(
+        (i for i in interaction if i.get("trigger") == "ON_CLICK"),
+        None,
+    )
+    if not click_interaction:
+        return jsx
+    
+    actions = click_interaction.get("actions", [])
+    if not actions:
+        return jsx
+    
+    first_action = actions[0]
+    action_type = first_action.get("type")
+    navigation = first_action.get("navigation")
+    dest_id = first_action.get("destinationId")
+    
+    # NAVIGATE → <Link>
+    if navigation == "NAVIGATE" and dest_id:
+        route = route_by_node_id.get(dest_id)
         if route:
             return f'<Link to="{route}">{jsx}</Link>'
-
+        return jsx
+    
+    # SCROLL_TO → button avec scrollIntoView
+    if navigation == "SCROLL_TO" and dest_id:
+        html_id = _html_id_from_figma_id(dest_id)
+        return (
+            f'<button type="button" onClick={{() => '
+            f'document.getElementById("{html_id}")?.scrollIntoView({{ behavior: "smooth" }})'
+            f'}}>{jsx}</button>'
+        )
+    
+    # OVERLAY → button avec setActiveOverlay
+    if navigation == "OVERLAY" and dest_id:
+        return (
+            f'<button type="button" onClick={{() => '
+            f'setActiveOverlay("{dest_id}")'
+            f'}}>{jsx}</button>'
+        )
+    
+    # BACK → navigate(-1)
+    if action_type == "BACK":
+        return (
+            f'<button type="button" onClick={{() => navigate(-1)}}>{jsx}</button>'
+        )
+    
     return jsx
 
 
 
 
-def _tree_has_interaction_type(node: dict, interaction_type: str) -> bool:
+def _tree_has_interaction_type(node: dict, navigation_type: str) -> bool:
+    """Vérifie si l'arbre contient une interaction du type donné.
+    
+    navigation_type : 'NAVIGATE', 'SCROLL_TO', 'OVERLAY' ou 'BACK'
+    """
     if not isinstance(node, dict):
         return False
-
-    interaction = node.get("interaction", {})
-    if interaction.get("type") == interaction_type:
-        return True
-
+    
+    interaction = node.get("interaction")
+    if isinstance(interaction, list):
+        for inter in interaction:
+            for action in inter.get("actions", []):
+                if navigation_type == "BACK":
+                    if action.get("type") == "BACK":
+                        return True
+                else:
+                    if action.get("navigation") == navigation_type:
+                        return True
+    
     for child in node.get("children", []):
-        if _tree_has_interaction_type(child, interaction_type):
+        if _tree_has_interaction_type(child, navigation_type):
             return True
-
+    
     return False
 
 def _collect_node_ids(node: dict, ids: set) -> None:
@@ -705,9 +790,9 @@ def _collect_node_ids(node: dict, ids: set) -> None:
 def _build_route_by_node_id(sections_data: dict) -> dict:
     route_by_node_id = {}
 
-    for i, page in enumerate(sections_data.get("pages", [])):
+    for page in sections_data.get("pages", []):
         safe_name = _sanitize_page_name(page.get("page_name", "Page"))
-        route = "/" if i == 0 else _route_from_page_name(safe_name)
+        route = _route_from_page_name(safe_name)
 
         if page.get("page_id"):
             route_by_node_id[page["page_id"]] = route
@@ -724,7 +809,7 @@ def _build_route_by_node_id(sections_data: dict) -> dict:
 # GÉNÉRATION DES PAGES
 # ═══════════════════════════════════════════════════════════════
 
-def _generate_page(page: dict, llm: ChatGroq = None) -> tuple[str, str, int, int]:
+def _generate_page(page: dict, llm = None) -> tuple[str, str, int, int]:
     """Génère le code d'une page entière.
     Retourne (file_name, code, llm_calls, imports_count).
     """
@@ -740,39 +825,57 @@ def _generate_page(page: dict, llm: ChatGroq = None) -> tuple[str, str, int, int
 
     imports_needed = set()
     needs_link = False
+    needs_navigate_hook = False
     needs_overlay_state = False
+
+    def _check_interaction(interaction):
+        """Détecte les besoins depuis une interaction (liste, nouveau format)."""
+        nonlocal needs_link, needs_navigate_hook, needs_overlay_state
+        
+        if not isinstance(interaction, list):
+            return
+        
+        for inter in interaction:
+            for action in inter.get("actions", []):
+                nav = action.get("navigation")
+                atype = action.get("type")
+                
+                if nav == "NAVIGATE":
+                    needs_link = True
+                    needs_navigate_hook = True   # ✅ besoin de navigate() pour child_interactions
+                elif nav == "OVERLAY":
+                    needs_overlay_state = True
+                elif atype == "BACK":
+                    needs_navigate_hook = True
 
     for child in ordered_children:
         data = child.get("data", {})
-        interaction = data.get("interaction", {})
+        _check_interaction(data.get("interaction"))
 
-        if interaction.get("type") == "navigate":
-            needs_link = True
-
-        if interaction.get("type") in ("open_overlay", "close_overlay"):
-            needs_overlay_state = True
+        # ✅ NOUVEAU : détecter les besoins depuis child_interactions
+        child_interactions = data.get("child_interactions", {})
+        for inters in child_interactions.values():
+            _check_interaction(inters)
 
         if child["kind"] == "instance":
             imports_needed.add(data.get("react_component_name"))
 
         elif child["kind"] == "section":
-            if _tree_has_interaction_type(data, "navigate"):
+            if _tree_has_interaction_type(data, "NAVIGATE"):
                 needs_link = True
-
-            if (
-                _tree_has_interaction_type(data, "open_overlay")
-                or _tree_has_interaction_type(data, "close_overlay")
-            ):
+            if _tree_has_interaction_type(data, "OVERLAY"):
                 needs_overlay_state = True
+            if _tree_has_interaction_type(data, "BACK"):
+                needs_navigate_hook = True
 
             for inst in child.get("nested_instances", []):
                 imports_needed.add(inst.get("react_component_name"))
-
-                inst_interaction = inst.get("interaction", {})
-                if inst_interaction.get("type") == "navigate":
-                    needs_link = True
-                if inst_interaction.get("type") in ("open_overlay", "close_overlay"):
-                    needs_overlay_state = True
+                _check_interaction(inst.get("interaction"))
+                
+                # ✅ NOUVEAU
+                inst_child_inter = inst.get("child_interactions", {})
+                for inters in inst_child_inter.values():
+                    _check_interaction(inters)
 
     imports_needed.discard(None)
 
@@ -787,13 +890,24 @@ def _generate_page(page: dict, llm: ChatGroq = None) -> tuple[str, str, int, int
         if kind == "instance":
             react_name = data.get("react_component_name", "Component")
             props_values = data.get("props_values", {})
+            child_interactions = data.get("child_interactions", {})   # ✅ NOUVEAU
 
-            jsx = _build_component_jsx(react_name, props_values)
+            jsx = _build_component_jsx(
+                react_name,
+                props_values,
+                child_interactions=child_interactions,
+                route_by_node_id=route_by_node_id,
+            )
             jsx = _wrap_with_interaction(
                 jsx,
                 data.get("interaction"),
                 route_by_node_id,
             )
+            # ✅ NOUVEAU : wrapper avec id pour permettre le scroll
+            instance_id = data.get("id")
+            if instance_id:
+                html_id = _html_id_from_figma_id(instance_id)
+                jsx = f'<div id="{html_id}">{jsx}</div>'
 
             jsx_blocks.append("        " + jsx)
             print(f"  [INSTANCE]  <{react_name} /> (direct)")
@@ -838,8 +952,17 @@ def _generate_page(page: dict, llm: ChatGroq = None) -> tuple[str, str, int, int
 
     import_lines = []
 
+    # Imports React Router (Link + useNavigate selon les besoins)
+    router_imports = []
     if needs_link:
-        import_lines.append("import { Link } from 'react-router-dom';")
+        router_imports.append("Link")
+    if needs_navigate_hook:
+        router_imports.append("useNavigate")
+    
+    if router_imports:
+        import_lines.append(
+            f"import {{ {', '.join(router_imports)} }} from 'react-router-dom';"
+        )
 
     for name in sorted(imports_needed):
         safe_name = _sanitize_component_name(name)
@@ -860,17 +983,22 @@ def _generate_page(page: dict, llm: ChatGroq = None) -> tuple[str, str, int, int
     page_width = int(page_styles.get("width", 1440))
     page_height = int(page_styles.get("height", 1024))
 
-    overlay_state_line = (
-        '  const [activeOverlay, setActiveOverlay] = useState<string | null>(null);\n'
-        if needs_overlay_state or overlay_blocks
-        else ""
-    )
+    # Construction des hooks (navigate + activeOverlay)
+    hooks_lines = []
+    if needs_navigate_hook:
+        hooks_lines.append("  const navigate = useNavigate();")
+    if needs_overlay_state or overlay_blocks:
+        hooks_lines.append("  const [activeOverlay, setActiveOverlay] = useState<string | null>(null);")
+    
+    hooks_block = "\n".join(hooks_lines)
+    if hooks_block:
+        hooks_block += "\n"
 
     page_code = f"""import React, {{ useEffect, useState }} from 'react';{imports_str}
 
 export default function {file_name}() {{
   const [scale, setScale] = useState(1);
-{overlay_state_line}
+{hooks_block}
   useEffect(() => {{
     const updateScale = () => {{
       const screenWidth = window.innerWidth;
@@ -909,7 +1037,7 @@ export default function {file_name}() {{
 
     return file_name, page_code, llm_calls, len(imports_needed)
 
-def generate_pages(sections_data: dict, llm: ChatGroq) -> None:
+def generate_pages(sections_data: dict, llm = None) -> None:
     """Génère tous les fichiers de pages."""
     print("\n[generateur] === Génération des pages ===")
     PAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -917,9 +1045,9 @@ def generate_pages(sections_data: dict, llm: ChatGroq) -> None:
     route_by_node_id = _build_route_by_node_id(sections_data)
 
     all_pages = []
-    for i, page in enumerate(sections_data.get("pages", [])):
+    for page in sections_data.get("pages", []):
         safe_name = _sanitize_page_name(page.get("page_name", "Page"))
-        route = "/" if i == 0 else _route_from_page_name(safe_name)
+        route = _route_from_page_name(safe_name)
 
         all_pages.append({
             "page_id": page.get("page_id"),
@@ -957,14 +1085,14 @@ def run_generateur() -> None:
     with open(SECTIONS_OUTPUT_FILE, "r", encoding="utf-8") as f:
         sections_data = json.load(f)
 
-    llm = ChatGroq(
-        model=QWEN_MODEL,
-        api_key=GROQ_API_KEY,
-        temperature=0.6,
-        max_tokens=MAX_TOKENS_STYLE,
-        model_kwargs={
-            "top_p": 0.95,
-        },
+    if not MISTRAL_API_KEY:
+        raise RuntimeError("MISTRAL_API_KEY manquant dans .env")
+
+    llm = ChatMistralAI(
+        model=CODESTRAL_MODEL,
+        api_key=MISTRAL_API_KEY,
+        temperature=0,
+        max_tokens=4000,
     )
 
     all_component_names = [
@@ -975,7 +1103,7 @@ def run_generateur() -> None:
 
     generate_components(architecture, llm)
     # ─── Étape 2 : pages ───
-    generate_pages(sections_data, llm)
+    generate_pages(sections_data, None)
 
     print("\n[generateur] === Génération terminée ===")
     print(f"[generateur] Projet → {PROJECT_DIR}")
@@ -988,15 +1116,7 @@ def run_generateur_page(page_name: str) -> None:
     with open(SECTIONS_OUTPUT_FILE, "r", encoding="utf-8") as f:
         sections_data = json.load(f)
 
-    llm = ChatGroq(
-        model=QWEN_MODEL,
-        api_key=GROQ_API_KEY,
-        temperature=0.6,
-        max_tokens=MAX_TOKENS_STYLE,
-        model_kwargs={
-            "top_p": 0.95,
-        },
-    )
+    
 
     matching = [
         p for p in sections_data.get("pages", [])
@@ -1010,9 +1130,9 @@ def run_generateur_page(page_name: str) -> None:
     route_by_node_id = _build_route_by_node_id(sections_data)
 
     all_pages = []
-    for i, p in enumerate(sections_data.get("pages", [])):
+    for p in sections_data.get("pages", []):
         safe_name = _sanitize_page_name(p.get("page_name", "Page"))
-        route = "/" if i == 0 else _route_from_page_name(safe_name)
+        route = _route_from_page_name(safe_name)
 
         all_pages.append({
             "page_id": p.get("page_id"),
@@ -1027,7 +1147,7 @@ def run_generateur_page(page_name: str) -> None:
         page["_all_pages"] = all_pages
         page["_route_by_node_id"] = route_by_node_id
 
-        file_name, page_code, _, _ = _generate_page(page, llm)
+        file_name, page_code, _, _ = _generate_page(page, None)
 
         file_path = PAGES_DIR / f"{file_name}.tsx"
         file_path.write_text(page_code, encoding="utf-8")

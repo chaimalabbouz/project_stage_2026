@@ -8,4 +8,4 @@ __pycache__/
 github_code/data/
 github_code/data2/
 
-github_code/.env
+node_modules/

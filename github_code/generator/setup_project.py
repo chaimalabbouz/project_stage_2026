@@ -190,8 +190,8 @@ def _write_app_tsx(pages: list[dict]) -> None:
     )
 
     routes = []
-    for i, p in enumerate(pages):
-        path = "/" if i == 0 else _route_from_page_name(p["name"])
+    for p in pages:
+        path = _route_from_page_name(p["name"])
         routes.append(f'        <Route path="{path}" element={{<{p["name"]} />}} />')
 
     content = f"""import React from 'react'

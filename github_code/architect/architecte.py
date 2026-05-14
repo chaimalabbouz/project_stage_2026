@@ -8,6 +8,7 @@ from config.settings import (
     GROQ_API_KEY,
     COMPONENT_REU_OUTPUT_FILE,
     ARCHITECTURE_FILE,
+    MINIMAL_OUTPUT_FILE, 
     MODEL,
 )
 
@@ -544,6 +545,124 @@ def _extract_node_styles(node):
     return out
 
 
+
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 3 — EXTRACTION DES INTERACTIONS (100% déterministe)
+# Objectif : détecter les nœuds interactifs sans destinationId
+# (le destinationId sera résolu plus tard dans les pages).
+# ═══════════════════════════════════════════════════════════════
+
+def _simplify_interactions(interactions):
+    """Nettoie les interactions d'un nœud : garde trigger + action_type uniquement.
+    
+    On enlève destinationId, transitionDuration, etc. — ces infos sont 
+    spécifiques au contexte d'usage et seront résolues au niveau pages.
+    """
+    if not isinstance(interactions, list):
+        return []
+    
+    simplified = []
+    for interaction in interactions:
+        if not isinstance(interaction, dict):
+            continue
+        
+        trigger = interaction.get("trigger", {})
+        trigger_type = trigger.get("type") if isinstance(trigger, dict) else None
+        if not trigger_type:
+            continue
+        
+        actions = interaction.get("actions", [])
+        if not isinstance(actions, list):
+            continue
+        
+        # Pour chaque action, garder uniquement le type et navigation
+        simplified_actions = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            action_entry = {"type": action.get("type")}
+            # navigation est utile (NAVIGATE, SCROLL_TO, OVERLAY, BACK...)
+            if "navigation" in action:
+                action_entry["navigation"] = action["navigation"]
+            simplified_actions.append(action_entry)
+        
+        if simplified_actions:
+            simplified.append({
+                "trigger": trigger_type,
+                "actions": simplified_actions,
+            })
+    
+    return simplified
+
+
+def _collect_components_interactions(figma_cleaned_path):
+    """Scanne figma_cleaned.json et collecte les interactions trouvées 
+    sur les INSTANCES de composants.
+    
+    Retourne : {component_id: {root: [...], nodes: {figma_name: [...]}}}
+    """
+    with open(figma_cleaned_path, "r", encoding="utf-8") as f:
+        cleaned = json.load(f)
+    
+    result = {}
+    
+    def _scan(node, current_component_id=None):
+        if not isinstance(node, dict):
+            return
+        
+        if node.get("type") == "INSTANCE":
+            component_id = node.get("componentId")
+            if component_id:
+                if component_id not in result:
+                    result[component_id] = {"root": [], "nodes": {}}
+                
+                raw = node.get("interactions", [])
+                if raw and not result[component_id]["root"]:
+                    simplified = _simplify_interactions(raw)
+                    if simplified:
+                        result[component_id]["root"] = simplified
+                
+                for child in node.get("children", []):
+                    _scan(child, current_component_id=component_id)
+                return
+        
+        if current_component_id:
+            raw = node.get("interactions", [])
+            if raw:
+                figma_name = node.get("name", "")
+                if figma_name and figma_name not in result[current_component_id]["nodes"]:
+                    simplified = _simplify_interactions(raw)
+                    if simplified:
+                        result[current_component_id]["nodes"][figma_name] = simplified
+        
+        for child in node.get("children", []):
+            _scan(child, current_component_id=current_component_id)
+    
+    # ✅ FIX : démarrer le scan depuis "document" 
+    document = cleaned.get("document", {})
+    _scan(document)
+    
+    return result
+
+
+def _get_interactions_for_component(component_id, all_interactions):
+    """Récupère les interactions d'un composant depuis le dict global."""
+    return all_interactions.get(component_id, {"root": [], "nodes": {}})
+
+
+def _get_variants_interactions(variant_ids, all_interactions):
+    """Récupère les interactions pour chaque variante d'un variant_set."""
+    return {
+        vid: all_interactions.get(vid, {"root": [], "nodes": {}})
+        for vid in variant_ids
+    }
+
+
+
+
+
+
 def _collect_styled_nodes(definition):
     """Dict indexé par figma_name des nœuds stylés (hors racine)."""
     styled = {}
@@ -756,11 +875,13 @@ def _build_architecture_entry(
     kind,
     props,
     styles,
+    interactions,  
     simplified_definition,
     variant_component_ids,
     component_set_id,
     variants_count,
     variants_styles,
+    variants_interactions,           # ← AJOUT
     imports,
     llm,
 ):
@@ -801,6 +922,9 @@ def _build_architecture_entry(
     # Si variant_set : injecter les styles par variante DANS styles
     if variants_styles is not None:
         styles = {**styles, "styles_by_variant": variants_styles}
+    # Variants : interactions                           # ← AJOUT
+    if variants_interactions is not None:
+        interactions = {**interactions, "interactions_by_variant": variants_interactions}    
 
     entry = {
         "component_id": component_id,
@@ -818,6 +942,7 @@ def _build_architecture_entry(
             "children_tree": simplified_definition,
         },
         "styles": styles,
+        "interactions": interactions,                   # ← AJOUT
         "imports": imports,
     }
 
@@ -837,19 +962,24 @@ def run_architecte():
     with open(COMPONENT_REU_OUTPUT_FILE, "r", encoding="utf-8") as f:
         reu_data = json.load(f)
 
-        # AJOUT : construire le catalogue {componentId: {name, props}}
-        catalog = {}
-        for comp in reu_data.get("standalone", []):
-          catalog[comp["component_id"]] = {
+    # Construire le catalogue {componentId: {name, props}}
+    catalog = {}
+    for comp in reu_data.get("standalone", []):
+        catalog[comp["component_id"]] = {
             "name": comp["name"],
             "props": comp.get("props", {}),
-          }
-        for vset in reu_data.get("variant_sets", []):
-          for variant in vset.get("variants", []):
+        }
+    for vset in reu_data.get("variant_sets", []):
+        for variant in vset.get("variants", []):
             catalog[variant["component_id"]] = {
                 "name": vset["name"],
                 "props": vset.get("props", {}),
             }
+
+    # ─── NOUVEAU : Collecter les interactions depuis figma_cleaned ───
+    print("[architecte] Collecte des interactions depuis figma_cleaned...")
+    all_interactions = _collect_components_interactions(MINIMAL_OUTPUT_FILE)
+    print(f"[architecte] {len(all_interactions)} composants ont des interactions")
 
     llm = ChatGroq(model=MODEL, api_key=GROQ_API_KEY, temperature=0)
     components_architecture = []
@@ -861,7 +991,6 @@ def run_architecte():
         print(f"[architecte] Standalone : {name}...")
 
         definition = comp.get("definition", {})
-        # AJOUT : remonter root_style au niveau definition
         root_style = definition.pop("root_style", {})
         definition.update(root_style)
         figma_props = comp.get("props", {})
@@ -876,9 +1005,11 @@ def run_architecte():
 
         # Styles déterministes
         styles = _extract_styles_full(definition)
-        imports = _extract_imports(definition, catalog)
 
-        # Payload LLM
+        # ✅ MODIFIÉ : Interactions récupérées depuis figma_cleaned
+        interactions = _get_interactions_for_component(component_id, all_interactions)
+
+        imports = _extract_imports(definition, catalog)
         simplified = _simplify_for_llm(definition)
 
         entry = _build_architecture_entry(
@@ -887,20 +1018,23 @@ def run_architecte():
             kind="standalone",
             props=final_props,
             styles=styles,
+            interactions=interactions,
             simplified_definition=simplified,
             variant_component_ids=[component_id],
             component_set_id=None,
             variants_count=1,
             variants_styles=None,
-            imports= imports,
+            variants_interactions=None,
+            imports=imports,
             llm=llm,
         )
 
         components_architecture.append(entry)
         prop_names = [p["name"] for p in final_props]
         node_count = len(styles["nodes"])
+        inter_count = len(interactions["nodes"]) + (1 if interactions["root"] else 0)
         print(f"[architecte] OK — {name} : {len(final_props)} props, "
-              f"{node_count} nœuds stylés. Props={prop_names}")
+              f"{node_count} nœuds stylés, {inter_count} interactions. Props={prop_names}")
 
     # ─── Variant sets ───
     for vset in reu_data.get("variant_sets", []):
@@ -914,15 +1048,28 @@ def run_architecte():
         final_props = _extract_props_union(variants, set_figma_props)
 
         first_def = variants[0].get("definition", {}) if variants else {}
-        # AJOUT : remonter root_style au niveau definition
         root_style = first_def.pop("root_style", {})
         first_def.update(root_style)
         base_styles = _extract_styles_full(first_def)
         variants_styles = _extract_variants_styles(variants)
-        imports = _extract_imports(first_def, catalog)
 
-        simplified = _simplify_for_llm(first_def)
+        # ✅ MODIFIÉ : Interactions récupérées depuis figma_cleaned
         variant_ids = [v["component_id"] for v in variants]
+        variants_interactions = _get_variants_interactions(variant_ids, all_interactions)
+
+        # base_interactions = première variante non vide (pour fallback)
+        base_interactions = {"root": [], "nodes": {}}
+        for vid in variant_ids:
+            v_inter = all_interactions.get(vid, {})
+            if v_inter.get("root") or v_inter.get("nodes"):
+                base_interactions = {
+                    "root": list(v_inter.get("root", [])),
+                    "nodes": dict(v_inter.get("nodes", {})),
+                }
+                break
+
+        imports = _extract_imports(first_def, catalog)
+        simplified = _simplify_for_llm(first_def)
 
         entry = _build_architecture_entry(
             name=name,
@@ -930,26 +1077,28 @@ def run_architecte():
             kind="variant_set",
             props=final_props,
             styles=base_styles,
+            interactions=base_interactions,
             simplified_definition=simplified,
             variant_component_ids=variant_ids,
             component_set_id=set_id,
             variants_count=len(variants),
             variants_styles=variants_styles,
+            variants_interactions=variants_interactions,
             imports=imports,
-            
             llm=llm,
         )
 
         components_architecture.append(entry)
         prop_names = [p["name"] for p in final_props]
         node_count = len(base_styles["nodes"])
+        inter_count = len(base_interactions["nodes"]) + (1 if base_interactions["root"] else 0)
         print(f"[architecte] OK — {name} : {len(final_props)} props (union), "
-              f"{node_count} nœuds stylés. Props={prop_names}")
+              f"{node_count} nœuds stylés, {inter_count} interactions. Props={prop_names}")
 
     # ─── Sauvegarde ───
     generation_order = _compute_generation_order(components_architecture)
     result = {
-        "generation_order": generation_order,    # ← AJOUT
+        "generation_order": generation_order,
         "total_components": len(components_architecture),
         "components": components_architecture,
     }

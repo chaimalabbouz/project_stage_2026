@@ -1,0 +1,23 @@
+# Noms de canvases Figma à ignorer (insensible à la casse, matching partiel)
+CANVAS_BLACKLIST = [
+    "cover",
+    "wireframe",
+    "component",
+    "design system",
+    "library",
+    "icon",
+    "asset",
+    "styleguide",
+    "style guide",
+    "token",
+    "changelog",
+    "archive",
+    "old",
+    "draft",
+    "template",
+    "doc",
+    "note",
+    "reference",
+    "Uikit",
+    "uikit",
+]

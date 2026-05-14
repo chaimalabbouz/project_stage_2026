@@ -441,35 +441,93 @@ def _extract_node_styles_for_section(node: dict) -> dict:
     return styles
 
 ##########################
-def _safe_html_id(figma_id: str) -> str:
-    return "figma-" + str(figma_id).replace(":", "-").replace(";", "-")
 
 
-def _extract_interaction(node: dict) -> dict | None:
+
+def _extract_interaction(node: dict) -> list | None:
+    """Extrait toutes les interactions du nœud.
+    
+    Garde TOUS les triggers et actions (pas de filtrage).
+    Préserve destinationId pour la résolution de routes plus tard.
+    Format cohérent avec architect.py.
+    """
     interactions = node.get("interactions") or node.get("reactions") or []
-    print(json.dumps(node.get("interactions", []), indent=2))
-
-    if not isinstance(interactions, list):
+    
+    if not isinstance(interactions, list) or not interactions:
         return None
-
+    
+    simplified = []
     for inter in interactions:
+        if not isinstance(inter, dict):
+            continue
+        
+        trigger = inter.get("trigger", {})
+        trigger_type = trigger.get("type") if isinstance(trigger, dict) else None
+        if not trigger_type:
+            continue
+        
         actions = inter.get("actions", [])
         if not isinstance(actions, list):
             continue
-
+        
+        simplified_actions = []
         for action in actions:
-            action_type = action.get("type")
-            navigation = action.get("navigation")
-            target = action.get("destinationId")
+            if not isinstance(action, dict):
+                continue
+            
+            entry = {"type": action.get("type")}
+            
+            # ✅ Préserver destinationId (clé pour la résolution de routes)
+            if "destinationId" in action:
+                entry["destinationId"] = action["destinationId"]
+            
+            if "navigation" in action:
+                entry["navigation"] = action["navigation"]
+            
+            simplified_actions.append(entry)
+        
+        if simplified_actions:
+            simplified.append({
+                "trigger": trigger_type,
+                "actions": simplified_actions,
+            })
+    
+    return simplified if simplified else None
 
-            if action_type == "NODE" and navigation == "NAVIGATE" and target:
-                return {
-                    "type": "navigate",
-                    "source_node_id": node.get("id"),
-                    "target_node_id": target,
-                }
+def _collect_descendant_interactions(
+    instance_node: dict,
+    interactions_index: dict[str, dict],
+) -> dict:
+    """Scanne récursivement les enfants d'une INSTANCE et collecte 
+    leurs interactions par figma_name.
+    
+    Retourne : {figma_name: [interactions...]}
+    """
+    result = {}
+    
+    def _scan(node):
+        if not isinstance(node, dict):
+            return
+        
+        node_id = node.get("id")
+        node_inter = interactions_index.get(node_id)
+        
+        if node_inter:
+            figma_name = node.get("name", "")
+            if figma_name and figma_name not in result:
+                result[figma_name] = node_inter
+        
+        for child in node.get("children", []):
+            _scan(child)
+    
+    # Scanner UNIQUEMENT les enfants (pas l'instance elle-même)
+    for child in instance_node.get("children", []):
+        _scan(child)
+    
+    return result
 
-    return None
+
+
 def _build_interactions_index(raw_index: dict[str, dict]) -> dict[str, dict]:
     interactions_index = {}
 
@@ -484,6 +542,9 @@ def _build_interactions_index(raw_index: dict[str, dict]) -> dict[str, dict]:
 
     print(f"[sections_extractor] Interactions détectées : {len(interactions_index)}")
     return interactions_index    
+
+
+
 #####################
 # ═══════════════════════════════════════════════════════════════
 # Nettoyage récursif d'une section libre
@@ -511,12 +572,16 @@ def _clean_node_recursive(
 
     # Récupérer interaction éventuelle du node
     interaction = interactions_index.get(node.get("id"))
+
     # ─── Cas 1 : instance de composant réutilisable ───
     if node_type == "INSTANCE" and component_id in architecture_index:
         arch_entry = architecture_index[component_id]
         react_name = arch_entry.get("name", node.get("name", "Component"))
         overrides = _collect_all_overrides(node)
         props_values = _match_overrides_to_props(overrides, arch_entry, react_name)
+
+        # ✅ NOUVEAU : collecter les interactions des enfants de l'instance
+        child_interactions = _collect_descendant_interactions(node, interactions_index)
 
         # Garder SEULEMENT les styles de positionnement et taille
         full_styles = _extract_node_styles_for_section(node)
@@ -550,17 +615,26 @@ def _clean_node_recursive(
         if interaction:
             instance_info["interaction"] = interaction
 
+        # ✅ NOUVEAU
+        if child_interactions:
+            instance_info["child_interactions"] = child_interactions
+
         instances_found.append(instance_info)
 
         placeholder = {
             "type": "__COMPONENT_PLACEHOLDER__",
             "react_component_name": react_name,
+            "id": node.get("id"),
             "component_id": component_id,
             "props_values": props_values,
         }
 
         if interaction:
             placeholder["interaction"] = interaction
+
+        # ✅ NOUVEAU
+        if child_interactions:
+            placeholder["child_interactions"] = child_interactions
 
         if instance_styles:
             placeholder["styles"] = instance_styles
@@ -637,7 +711,6 @@ def _clean_node_recursive(
             cleaned["children"] = cleaned_children
 
     return cleaned
-
 
 def _flatten_useless_wrappers(node: dict) -> dict | None:
     """Supprime les FRAME intermédiaires inutiles (pas de style, pas de contenu).
@@ -1017,6 +1090,8 @@ def extract_sections() -> dict:
                     )
 
                     interaction = interactions_index.get(child_id)
+                    # ✅ NOUVEAU : collecter les interactions des enfants
+                    child_interactions = _collect_descendant_interactions(raw_node, interactions_index)
 
                     instance_data = {
                         "id": child_id,
@@ -1028,6 +1103,9 @@ def extract_sections() -> dict:
 
                     if interaction:
                         instance_data["interaction"] = interaction
+                    # ✅ NOUVEAU
+                    if child_interactions:
+                         instance_data["child_interactions"] = child_interactions    
 
                     ordered_children.append({
                         "kind": "instance",
@@ -1038,9 +1116,10 @@ def extract_sections() -> dict:
                     total_instances += 1
 
                     if interaction:
+                        triggers = [i.get("trigger") for i in interaction]
                         print(
                             f"  [INSTANCE] {child_name} -> <{react_name} "
-                            f"{list(props_values.keys())} /> interaction={interaction.get('type')}"
+                            f"{list(props_values.keys())} /> interactions={triggers}"
                         )
                     else:
                         print(

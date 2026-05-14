@@ -607,7 +607,12 @@ def _has_image_fill(node: dict) -> bool:
 
 def _build_jsx_call(node: dict) -> str:
     """Construit l'appel JSX depuis un placeholder."""
-    react_name = node.get("react_component_name", "Component")
+    raw_name = node.get("react_component_name", "Component")
+    
+    # ✅ NOUVEAU : sanitizer pour enlever les espaces
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", " ", raw_name).strip().split()
+    react_name = "".join(p[0].upper() + p[1:] if p else "" for p in cleaned) or "Component"
+    
     props_values = node.get("props_values", {})
     if not props_values:
         return f"<{react_name} />"
@@ -640,50 +645,59 @@ def _html_id_from_figma_id(figma_id: str) -> str:
 
 def _wrap_jsx_with_interaction(
     jsx: str,
-    interaction: dict | None,
+    interaction,
     route_by_node_id: dict,
 ) -> str:
+    """Enveloppe le JSX selon le nouveau format d'interactions."""
     if not interaction:
         return jsx
-
-    interaction_type = interaction.get("type")
-
-    if interaction_type == "navigate":
-        target_id = interaction.get("target_node_id")
-        route = route_by_node_id.get(target_id)
+    
+    if not isinstance(interaction, list):
+        return jsx
+    
+    click_interaction = next(
+        (i for i in interaction if i.get("trigger") == "ON_CLICK"),
+        None,
+    )
+    if not click_interaction:
+        return jsx
+    
+    actions = click_interaction.get("actions", [])
+    if not actions:
+        return jsx
+    
+    first_action = actions[0]
+    action_type = first_action.get("type")
+    navigation = first_action.get("navigation")
+    dest_id = first_action.get("destinationId")
+    
+    if navigation == "NAVIGATE" and dest_id:
+        route = route_by_node_id.get(dest_id)
         if route:
             return f'<Link to="{route}">{jsx}</Link>'
         return jsx
-
-    if interaction_type == "scroll":
-        target = interaction.get("target_html_id") or _html_id_from_figma_id(
-            interaction.get("target_node_id", "")
-        )
+    
+    if navigation == "SCROLL_TO" and dest_id:
+        html_id = _html_id_from_figma_id(dest_id)
         return (
             f'<button type="button" onClick={{() => '
-            f'document.getElementById("{target}")?.scrollIntoView({{ behavior: "smooth" }})'
+            f'document.getElementById("{html_id}")?.scrollIntoView({{ behavior: "smooth" }})'
             f'}}>{jsx}</button>'
         )
-
-    if interaction_type == "open_overlay":
-        target = interaction.get("target_overlay_id") or _html_id_from_figma_id(
-            interaction.get("target_node_id", "")
-        )
+    
+    if navigation == "OVERLAY" and dest_id:
         return (
             f'<button type="button" onClick={{() => '
-            f'setActiveOverlay("{target}")'
+            f'setActiveOverlay("{dest_id}")'
             f'}}>{jsx}</button>'
         )
-
-    if interaction_type == "close_overlay":
+    
+    if action_type == "BACK":
         return (
-            f'<button type="button" onClick={{() => '
-            f'setActiveOverlay(null)'
-            f'}}>{jsx}</button>'
+            f'<button type="button" onClick={{() => navigate(-1)}}>{jsx}</button>'
         )
-
+    
     return jsx
-
 
 def _generate_node_jsx(
     node: dict,
@@ -704,12 +718,14 @@ def _generate_node_jsx(
     if node_type == "__COMPONENT_PLACEHOLDER__":
         jsx_call = node.get("jsx_call") or _build_jsx_call(node)
         styles = node.get("styles", {})
+        node_id = node.get("id")   # ✅ NOUVEAU
+        id_attr = f' id="{_html_id_from_figma_id(node_id)}"' if node_id else ""
 
         if styles:
             tw_classes = convert_node_styles(styles)
             if tw_classes:
                 jsx = (
-                    f'<div className="{tw_classes}">\n'
+                    f'<div{id_attr} className="{tw_classes}">\n'
                     f'  {jsx_call}\n'
                     f'</div>'
                 )
@@ -720,8 +736,14 @@ def _generate_node_jsx(
                 )
                 return f"{prefix}{jsx}"
 
+        # ✅ NOUVEAU : envelopper avec id même sans styles
+        if node_id:
+            jsx = f'<div{id_attr}>{jsx_call}</div>'
+        else:
+            jsx = jsx_call
+
         jsx = _wrap_jsx_with_interaction(
-            jsx_call,
+            jsx,
             interaction,
             route_by_node_id,
         )
@@ -796,7 +818,6 @@ def _generate_node_jsx(
         interaction,
         route_by_node_id,
     )
-
 
 def generate_section_jsx_deterministic(
     section_data: dict,
