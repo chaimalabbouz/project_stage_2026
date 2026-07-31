@@ -11,114 +11,12 @@ from config.settings import (
     MINIMAL_OUTPUT_FILE, 
     MODEL,
 )
+from db.prompt_loader import get_prompt_config
+
 
 LLM_DELAY = 4
 
 
-# ═══════════════════════════════════════════════════════════════
-# PROMPT LLM — sémantique uniquement
-# ═══════════════════════════════════════════════════════════════
-
-SYSTEM_PROMPT = """
-Tu es un expert en architecture de composants React TypeScript.
-
-Tu reçois la description d un composant déjà analysé. Son nom React, son id,
-ses props et ses styles sont DÉJÀ DÉTERMINÉS. Tu n as PAS à les produire,
-ni à les modifier, ni à les renommer, ni à en inventer de nouveaux.
-
-Ton UNIQUE rôle est de fournir les informations sémantiques suivantes :
-
-{
-  "suggested_file": "src/components/NomFourni.tsx",
-  "layout": "vertical",
-  "has_image": true,
-  "has_text": true,
-  "external_deps": ["@mui/icons-material"],
-  "children_structure": ["Titre en haut", "Image au centre", "Bouton en bas"]
-}
-
-Règles STRICTES :
-- Retourne UNIQUEMENT un JSON valide, sans markdown, sans texte avant/après.
-- suggested_file : "src/components/{NomFourni}.tsx" en reprenant EXACTEMENT le
-  nom reçu dans le champ "name" du payload. Ne le renomme JAMAIS.
-- layout : une seule valeur parmi "vertical", "horizontal", "grid", "none".
-  Déduis-la du layoutMode de la racine si présent (VERTICAL->vertical,
-  HORIZONTAL->horizontal, NONE->none), sinon choisis selon la disposition
-  décrite dans children_preview.
-- has_image : true s il y a au moins un nœud IMAGE dans la structure.
-- has_text : true s il y a au moins un nœud TEXT dans la structure.
-- external_deps : liste de packages npm nécessaires (ex: ["@mui/material"]).
-  Liste vide [] si aucune dép externe évidente. N invente pas de deps au hasard.
-- children_structure : courte description ordonnée des éléments visuels,
-  une chaîne par élément, max 8 chaînes.
-- NE PAS inclure de champs autres que les 6 ci-dessus.
-- NE PAS produire "name", "component_id", "props", "variant_component_ids",
-  "styles" : ces champs sont ajoutés par le code Python après ta réponse.
-
-═══════════════════════════════════════════════════════════════
-EXEMPLE 1 — Composant standalone simple
-═══════════════════════════════════════════════════════════════
-
-Payload reçu :
-{
-  "name": "Badge",
-  "kind": "standalone",
-  "props": [
-    {"name": "label", "figma_name": "label", "type": "string"}
-  ],
-  "children_preview": [
-    {"type": "FRAME", "layoutMode": "HORIZONTAL", "name": "badge-container"},
-    {"type": "TEXT", "name": "label"}
-  ]
-}
-
-Réponse attendue :
-{
-  "suggested_file": "src/components/Badge.tsx",
-  "layout": "horizontal",
-  "has_image": false,
-  "has_text": true,
-  "external_deps": [],
-  "children_structure": ["Conteneur horizontal avec texte label centré"]
-}
-
-═══════════════════════════════════════════════════════════════
-EXEMPLE 2 — Variant set avec image
-═══════════════════════════════════════════════════════════════
-
-Payload reçu :
-{
-  "name": "ProductCard",
-  "kind": "variant_set",
-  "variants_count": 3,
-  "props": [
-    {"name": "size", "figma_name": "Size", "type": "\"Small\" | \"Large\""},
-    {"name": "title", "figma_name": "title", "type": "string"},
-    {"name": "price", "figma_name": "price", "type": "string"},
-    {"name": "imageUrl", "figma_name": "product-image", "type": "string"}
-  ],
-  "children_preview": [
-    {"type": "FRAME", "layoutMode": "VERTICAL", "name": "card"},
-    {"type": "IMAGE", "name": "product-image"},
-    {"type": "TEXT", "name": "title"},
-    {"type": "TEXT", "name": "price"}
-  ]
-}
-
-Réponse attendue :
-{
-  "suggested_file": "src/components/ProductCard.tsx",
-  "layout": "vertical",
-  "has_image": true,
-  "has_text": true,
-  "external_deps": [],
-  "children_structure": [
-    "Image produit en haut",
-    "Titre du produit",
-    "Prix affiché en bas"
-  ]
-}
-""".strip()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -884,6 +782,7 @@ def _build_architecture_entry(
     variants_interactions,           # ← AJOUT
     imports,
     llm,
+    system_prompt,
 ):
     """Assemble une entrée : identity + architecture + styles."""
     llm_payload = {
@@ -898,7 +797,7 @@ def _build_architecture_entry(
     }
 
     payload_str = json.dumps(llm_payload, ensure_ascii=False, separators=(",", ":"))
-    raw_text = _call_llm(SYSTEM_PROMPT,
+    raw_text = _call_llm(system_prompt,
                          f"Voici le composant à analyser :\n\n{payload_str}",
                          llm)
 
@@ -958,6 +857,14 @@ def _build_architecture_entry(
 
 def run_architecte():
     print("\n[architecte] Chargement des fichiers...")
+    # ✅ NOUVEAU : Charger la configuration depuis la base de données
+    print("[architecte] Chargement du prompt depuis la base...")
+    config = get_prompt_config("analyse_architecture_composant")
+    
+    SYSTEM_PROMPT = config['prompt']
+    MODEL = config['model_name']
+    TEMPERATURE = config['temperature']
+    MAX_TOKENS = config['max_tokens'] if config['max_tokens'] else None
 
     with open(COMPONENT_REU_OUTPUT_FILE, "r", encoding="utf-8") as f:
         reu_data = json.load(f)
@@ -981,7 +888,12 @@ def run_architecte():
     all_interactions = _collect_components_interactions(MINIMAL_OUTPUT_FILE)
     print(f"[architecte] {len(all_interactions)} composants ont des interactions")
 
-    llm = ChatGroq(model=MODEL, api_key=GROQ_API_KEY, temperature=0)
+    llm = ChatGroq(
+        model=MODEL,
+        api_key=GROQ_API_KEY,
+        temperature=TEMPERATURE,
+        max_tokens=MAX_TOKENS,
+    )
     components_architecture = []
 
     # ─── Standalone ───
@@ -1027,6 +939,7 @@ def run_architecte():
             variants_interactions=None,
             imports=imports,
             llm=llm,
+            system_prompt=SYSTEM_PROMPT,  # 
         )
 
         components_architecture.append(entry)
@@ -1086,6 +999,7 @@ def run_architecte():
             variants_interactions=variants_interactions,
             imports=imports,
             llm=llm,
+            system_prompt=SYSTEM_PROMPT,
         )
 
         components_architecture.append(entry)

@@ -9,6 +9,19 @@ avec les classes Tailwind correspondantes.
 
 Utilisé entre le LLM #1 (structure) et le LLM #2 (vérification)
 dans le pipeline du générateur.
+
+── CORRECTIFS APPLIQUÉS ──────────────────────────────────────────
+1. `relative` automatique : tout nœud qui a un enfant en position
+   absolute (_position) devient automatiquement `relative`, même si
+   `_positioning` n'était pas marqué explicitement en amont.
+2. Suppression des wrappers <div> inutiles : un FRAME/GROUP sans
+   classes Tailwind significatives et sans interaction est "collapse"
+   (0 enfant → rien, 1 enfant → l'enfant directement,
+   plusieurs enfants → Fragment <> au lieu de <div>).
+3. Détection des champs de saisie : un nœud TEXT dont le nom suggère
+   un placeholder de champ (search/input/placeholder/textfield) est
+   rendu en <input placeholder="..."> au lieu de <span>.
+═══════════════════════════════════════════════════════════════════
 """
 
 import re
@@ -91,8 +104,12 @@ def _convert_layout(layout: dict) -> list[str]:
 
     # Gap (fonctionne pour flex ET grid ✔️)
     spacing = layout.get("itemSpacing")
-    if spacing is not None and spacing > 0:
-        classes.append(f"gap-[{_fmt(spacing)}px]")
+    #a rajouter si le scrol na pas marcher et le layout a casse 
+    #if spacing is not None and spacing > 0:
+        #classes.append(f"gap-[{_fmt(spacing)}px]")
+    skip_gap = (mode != "GRID") and (primary == "SPACE_BETWEEN")
+    if spacing is not None and spacing > 0 and not skip_gap:
+        classes.append(f"gap-[{_fmt(spacing)}px]")    
 
     return classes
 
@@ -605,6 +622,90 @@ def _has_image_fill(node: dict) -> bool:
     return False
 
 
+# ─────────────────────────────────────────────────────────────
+# FIX 1 : détection "faut-il forcer relative sur ce nœud ?"
+# ─────────────────────────────────────────────────────────────
+def _node_needs_relative_container(node: dict) -> bool:
+    """
+    True si ce nœud a au moins un enfant DIRECT positionné en absolute
+    (styles._position présent). Dans ce cas le nœud doit être son
+    "containing block" CSS, donc devenir `relative`, indépendamment
+    du flag `_positioning` défini (ou non) en amont dans l'extraction.
+    """
+    children = node.get("children", [])
+    if not isinstance(children, list):
+        return False
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        child_styles = child.get("styles", {})
+        if isinstance(child_styles, dict) and isinstance(child_styles.get("_position"), dict):
+            return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────
+# FIX 4 : calcul de fallback de taille pour un conteneur dont
+# TOUS les enfants significatifs sont en position absolute et qui
+# n'a pas lui-même de width/height. Sans ça, le conteneur "relative"
+# collapse à 0x0 (les enfants absolute ne comptent pas dans le flux),
+# ce qui provoque : sections invisibles, texte superposé, éléments
+# décalés/mal centrés plus haut dans l'arbre.
+# ─────────────────────────────────────────────────────────────
+def _bbox_from_absolute_children(node: dict):
+    """
+    Calcule (largeur, hauteur) nécessaires pour englober tous les
+    enfants directs positionnés en absolute (top/left + leur propre
+    width/height si connue). Retourne None si aucun enfant absolute
+    n'a pu être mesuré.
+    """
+    children = node.get("children", [])
+    if not isinstance(children, list):
+        return None
+
+    max_right = 0
+    max_bottom = 0
+    found = False
+
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        cs = child.get("styles", {})
+        if not isinstance(cs, dict):
+            continue
+        pos = cs.get("_position")
+        if not isinstance(pos, dict):
+            continue
+
+        top = pos.get("top") or 0
+        left = pos.get("left") or 0
+        w = cs.get("width") or 0
+        h = cs.get("height") or 0
+
+        max_right = max(max_right, left + w)
+        max_bottom = max(max_bottom, top + h)
+        found = True
+
+    if not found:
+        return None
+    return max_right, max_bottom
+
+
+# ─────────────────────────────────────────────────────────────
+# FIX 3 : détection "ce texte est en fait un placeholder d'input"
+# ─────────────────────────────────────────────────────────────
+_INPUT_NAME_HINTS = ("search", "input", "placeholder", "textfield", "text field", "text-field")
+
+
+def _looks_like_input_placeholder(node: dict) -> bool:
+    """
+    Heuristique : le nom du calque Figma suggère un champ de saisie
+    (ex: "Search Aladdin", "Search input", "Email placeholder"...).
+    """
+    name = (node.get("name") or "").lower()
+    return any(hint in name for hint in _INPUT_NAME_HINTS)
+
+
 def _build_jsx_call(node: dict) -> str:
     """Construit l'appel JSX depuis un placeholder."""
     raw_name = node.get("react_component_name", "Component")
@@ -761,6 +862,29 @@ def _generate_node_jsx(
     else:
         tw_classes = ""
 
+    # ─── FIX 1 : forcer `relative` si un enfant est en absolute ───
+    needs_relative = _node_needs_relative_container(node)
+    if needs_relative:
+        existing = tw_classes.split()
+        if "absolute" not in existing and "relative" not in existing:
+            tw_classes = (tw_classes + " relative").strip()
+
+    # ─── FIX 4 : fallback de taille si le conteneur n'a pas de
+    # width/height propre alors qu'il héberge des enfants absolute
+    # (sinon il collapse à 0x0 et "avale" tout ce qui suit visuellement) ───
+    if needs_relative:
+        current = tw_classes.split()
+        has_width = any(c.startswith("w-") for c in current)
+        has_height = any(c.startswith("h-") for c in current)
+        if not (has_width and has_height):
+            bbox = _bbox_from_absolute_children(node)
+            if bbox:
+                bw, bh = bbox
+                if not has_width and bw > 0:
+                    tw_classes = (tw_classes + f" w-[{_fmt(bw)}px]").strip()
+                if not has_height and bh > 0:
+                    tw_classes = (tw_classes + f" h-[{_fmt(bh)}px]").strip()
+
     class_attr = f' className="{tw_classes}"' if tw_classes else ""
 
     # ─── Image ───
@@ -774,10 +898,14 @@ def _generate_node_jsx(
         )
         return f"{prefix}{jsx}"
 
-    # ─── Texte ───
+    # ─── Texte / Input (FIX 3) ───
     if node_type == "TEXT" and characters:
-        safe_text = _escape_jsx_text(characters)
-        jsx = f"<span{class_attr}>{safe_text}</span>"
+        if _looks_like_input_placeholder(node):
+            safe_placeholder = characters.replace('"', '\\"').replace("\n", " ")
+            jsx = f'<input type="text" placeholder="{safe_placeholder}"{class_attr} />'
+        else:
+            safe_text = _escape_jsx_text(characters)
+            jsx = f"<span{class_attr}>{safe_text}</span>"
         jsx = _wrap_jsx_with_interaction(
             jsx,
             interaction,
@@ -785,9 +913,20 @@ def _generate_node_jsx(
         )
         return f"{prefix}{jsx}"
 
+    # ─── FIX 2 : simplifier les wrappers FRAME/GROUP sans style ───
+    if tw_classes == "" and node_type in ("FRAME", "GROUP") and not interaction:
+        if not children:
+            return ""
+        if len(children) == 1:
+            return _generate_node_jsx(
+                children[0],
+                indent,
+                route_by_node_id=route_by_node_id,
+            )
+
     tag = "div"
 
-    # Pas d'enfants → div vide
+    # Pas d'enfants → div vide (pour les types non FRAME/GROUP, ex: RECTANGLE décoratif)
     if not children and not characters:
         jsx = f"<{tag}{class_attr}></{tag}>"
         jsx = _wrap_jsx_with_interaction(
@@ -797,8 +936,18 @@ def _generate_node_jsx(
         )
         return f"{prefix}{jsx}"
 
+    # FIX 2 (suite) : plusieurs enfants, aucun style significatif → Fragment
+    use_fragment = (
+        tw_classes == ""
+        and node_type in ("FRAME", "GROUP")
+        and len(children) > 1
+        and not interaction
+    )
+    tag_open = "<>" if use_fragment else f"<{tag}{class_attr}>"
+    tag_close = "</>" if use_fragment else f"</{tag}>"
+
     # Avec enfants → récursion
-    lines = [f"{prefix}<{tag}{class_attr}>"]
+    lines = [f"{prefix}{tag_open}"]
 
     for child in children:
         if isinstance(child, dict):
@@ -810,7 +959,7 @@ def _generate_node_jsx(
             if child_jsx:
                 lines.append(child_jsx)
 
-    lines.append(f"{prefix}</{tag}>")
+    lines.append(f"{prefix}{tag_close}")
 
     jsx = "\n".join(lines)
     return _wrap_jsx_with_interaction(

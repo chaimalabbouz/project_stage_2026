@@ -34,6 +34,9 @@ INPUT_PLANNER_FILE = DATA2_DIR / "input_planner" / "payload.json"
 ANALYSE_OUTPUT_FILE = DATA2_DIR / "plans" / "analyse.json"
 ARCHITECTURE_FILE = DATA2_DIR / "plans" / "architecture.json"
 
+
+
+
 OUTPUT_DIR = DATA2_DIR / "output"
 PROJECT_NAME = "my-app"
 PROJECT_DIR = OUTPUT_DIR / PROJECT_NAME

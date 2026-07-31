@@ -19,17 +19,21 @@ def save_cleaned(data: dict) -> None:
     print(f"[pipeline] JSON nettoyé sauvegardé -> {MINIMAL_OUTPUT_FILE} ({size_kb:.1f} KB)")
 
 
-def run_figma_extraction_pipeline() -> dict:
+def run_figma_extraction_pipeline(figma_id: str = None) -> dict:
     """
     Pipeline complet :
-    1. Fetch JSON Figma
+    1. Fetch JSON Figma (avec figma_id dynamique si fourni)
     2. Filter canvases
     3. Clean nodes
     4. Save résultat
     """
     print("\n=== Figma Extraction Pipeline ===")
 
-    raw_data = fetch_and_save()
+    if figma_id:
+        raw_data = fetch_and_save(file_id=figma_id)
+    else:
+        raw_data = fetch_and_save()
+    
     filtered_data = filter_canvases(raw_data)
     cleaned_data = clean_tree(filtered_data)
 

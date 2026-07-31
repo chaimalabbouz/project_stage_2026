@@ -1043,6 +1043,7 @@ def extract_sections() -> dict:
             page_raw = raw_index.get(page_id, {})
             page_styles = _extract_page_styles(page_raw) if page_raw else {}
             page_layout_mode = page_raw.get("layoutMode") if page_raw else None
+            page_bbox = page_raw.get("absoluteBoundingBox") if page_raw else None   
 
             raw_children = page.get("children", [])
             sorted_children = _sort_children_by_visual_position(
@@ -1090,7 +1091,7 @@ def extract_sections() -> dict:
                     )
 
                     interaction = interactions_index.get(child_id)
-                    # ✅ NOUVEAU : collecter les interactions des enfants
+                    
                     child_interactions = _collect_descendant_interactions(raw_node, interactions_index)
 
                     instance_data = {
@@ -1100,10 +1101,20 @@ def extract_sections() -> dict:
                         "react_component_name": react_name,
                         "props_values": props_values,
                     }
-
+                    # ← AJOUT : position relative à la page
+                    inst_bbox = raw_node.get("absoluteBoundingBox")
+                    if isinstance(page_bbox, dict) and isinstance(inst_bbox, dict):
+                        instance_data["styles"] = {
+                            "_position": {
+                                "top": round(inst_bbox.get("y", 0) - page_bbox.get("y", 0), 1),
+                                "left": round(inst_bbox.get("x", 0) - page_bbox.get("x", 0), 1),
+                            },
+                            "width": inst_bbox.get("width", 0),
+                            "height": inst_bbox.get("height", 0),
+                        }    
                     if interaction:
                         instance_data["interaction"] = interaction
-                    # ✅ NOUVEAU
+                    
                     if child_interactions:
                          instance_data["child_interactions"] = child_interactions    
 
@@ -1148,6 +1159,18 @@ def extract_sections() -> dict:
                         nested_instances,
                         depth=0,
                     )
+                    # ← AJOUT : position relative à la page, capturée avant que _inject_absolute_positions jette _bbox
+                    section_bbox = cleaned.get("_bbox")
+                    if isinstance(page_bbox, dict) and isinstance(section_bbox, dict):
+                        cleaned.setdefault("styles", {})
+                        cleaned["styles"]["_position"] = {
+                            "top": round(section_bbox.get("y", 0) - page_bbox.get("y", 0), 1),
+                            "left": round(section_bbox.get("x", 0) - page_bbox.get("x", 0), 1),
+                        }    
+
+
+
+                    
 
                     cleaned = _inject_absolute_positions(cleaned)
                     cleaned = _flatten_useless_wrappers(cleaned)

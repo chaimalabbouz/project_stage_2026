@@ -1,29 +1,4 @@
-""""
-generateur.py
-=============
-Génère le code React TypeScript des composants et des pages.
 
-STRATÉGIE : 2 LLMs séquentiels pour CHAQUE composant / section
-  - LLM #1 (STRUCTURE) : produit le squelette JSX avec className="" vide
-    et un attribut data-fname="..." sur chaque élément pour traçabilité.
-    Il reçoit UNIQUEMENT la structure (props, layout, nodes list) — pas les styles.
-
-  - LLM #2 (STYLE) : reçoit le squelette de #1 et les styles bruts.
-    Il remplit les className="" avec du Tailwind arbitraire
-    (ex: p-[16px], text-[#1a1a1a], gap-[8px]).
-
-Python post-processe : retire data-fname, ajoute imports, écrit le fichier.
-
-INPUTS :
-  - architecture.json : définitions complètes des composants (props + styles)
-  - sections.json    : pages avec placeholders d'instances + sections libres
-
-OUTPUTS :
-  - OUTPUT_DIR/my-app/src/components/*.tsx
-  - OUTPUT_DIR/my-app/src/pages/*.tsx
-
-
-"""
 
 import json
 import time
@@ -146,104 +121,67 @@ de composant local importé (Button, Card, etc.), il faut :
 Exemple si interactions.nodes = {"Button": [...]} :
   Props : onButtonClick?: () => void;
   Usage : <Button ... onClick={onButtonClick} />
+
+
+13. PROPS TOUJOURS OPTIONNELLES AVEC VALEUR PAR DÉFAUT :
+Une instance Figma n'override QUE certaines props ; les autres gardent
+leur valeur par défaut du composant. TOUTES les props doivent être
+optionnelles (`?`) avec une valeur par défaut dans la déstructuration,
+correspondant à architecture.props[].default si présent, sinon selon
+le type (boolean→false, string→"", number→0, union→première valeur
+listée, ReactNode→null). Exception : les callbacks (onClick, on<X>Click)
+restent optionnels sans valeur par défaut obligatoire.
+
+13bis. SI `default` EST ABSENT pour une prop, applique STRICTEMENT le
+tableau ci-dessus selon le type. Ne jamais improviser une valeur
+"logique" au jugé — le choix doit être entièrement déterminé par le
+type déclaré, jamais par une intuition sur ce composant précis.
+
+13ter. PROPS DE SURCHARGE ("change<X>") : TOUJOURS VIDES PAR DÉFAUT
+Une prop dont le nom commence par "change" (changeText, changeLeftIcon,
+changeRightIcon, etc.) est une SURCHARGE CONDITIONNELLE, pas un texte
+de base. Elle doit avoir comme valeur par défaut "" (string) ou null
+(ReactNode) — IGNORE toute valeur `default` non-vide trouvée dans le
+payload pour ce type de prop, même si le payload en indique une.
+Le texte/icône réellement affiché par défaut vient UNIQUEMENT de la
+prop qui ne commence PAS par "change" (buyNow, label, title...), avec
+sa vraie valeur par défaut Figma.
+
+Exemple correct :
+  changeText = "",
+  buyNow = "Buy Now",
+Exemple INTERDIT :
+  changeText = "Buy Now",  // rend buyNow inatteignable via changeText || buyNow
+
+14. ICÔNES : JAMAIS D'IMPORT EXTERNE
+Interdiction absolue d'importer un package d'icônes (@tabler/icons,
+@solar-ui/icons, lucide-react, react-icons, ou autre). Pour chaque
+icône Figma référencée, génère un SVG inline minimal (<svg>...</svg>,
+~16-24px, currentColor) qui représente au mieux l'icône visée par son
+nom, directement dans le composant. Aucun import supplémentaire n'est
+autorisé pour ça, aucune exception.
+
+15. FEEDBACK VISUEL AU CLIC (hover/active)
+Figma n'expose généralement pas d'état hover/pressed séparé dans les
+données du payload (ce sont des variants non capturés par l'extraction).
+Pour compenser, tout élément possédant un `onClick` (bouton, lien, ou
+tout élément interactif rendu par la règle 12) DOIT recevoir en plus
+de ses classes normales :
+- Si l'élément a un fond coloré (bg-[#hex]) : ajoute `hover:opacity-90
+  active:opacity-75 transition-opacity`.
+- Si l'élément n'a PAS de fond (texte seul, icône seule) : ajoute
+  `hover:opacity-70 active:opacity-50 transition-opacity`.
+- Ajoute toujours `cursor-pointer` sur ces éléments.
+
+C'est un fallback UNIFORME et déterministe (opacité), pas une tentative
+de deviner une couleur de hover différente à chaque fois — n'invente
+jamais une nouvelle couleur bg-[#hex2] pour l'état hover.
+
 """.strip()
 
 
 
 
-# ═══════════════════════════════════════════════════════════════
-# PROMPT LLM #3 — SECTIONS LIBRES (structure + style en un pass)
-# ═══════════════════════════════════════════════════════════════
-
-SECTION_SYSTEM_PROMPT = """
-Tu es un expert React TypeScript et Tailwind CSS.
-Tu reçois une SECTION de page Figma (un FRAME libre) avec :
-- Son arbre de nœuds (type, name, characters, styles à chaque nœud)
-- Les appels JSX des composants réutilisables déjà construits (jsx_calls)
-- La liste des imports nécessaires
-
-Tu dois produire le JSX COMPLET de la section AVEC les classes Tailwind,
-en un seul bloc. Pas de fonction, pas d interface, juste le JSX.
-
-Tu dois produire UNIQUEMENT le JSX, sans markdown, sans explication,
-sans bloc de code.
-
-RÈGLES :
-1. Pour chaque nœud libre (FRAME, TEXT, RECTANGLE, etc.) :
-   - Convertir en HTML approprié (div, span, p, img, etc.)
-   - Appliquer les classes Tailwind depuis le champ "styles" du nœud
-   - Mêmes règles de conversion Tailwind que pour les composants :
-     layoutMode -> flex flex-col/flex-row
-     padding -> p-[Npx] / px-[Npx] py-[Npx]
-     itemSpacing -> gap-[Npx]
-     fills SOLID -> bg-[#hex]
-     fontSize -> text-[Npx]
-     fontWeight -> font-normal/medium/semibold/bold
-     cornerRadius -> rounded-[Npx]
-     effects DROP_SHADOW -> shadow-[...]
-     etc.
-
-2. Pour chaque __COMPONENT_PLACEHOLDER__ :
-   Utiliser le jsx_call TEL QUEL, sans ajouter de className ni wrapper
-
-3. Pour les nœuds TEXT avec "characters" :
-   Afficher le texte directement (pas de prop, c est du contenu statique)
-
-4. Pour les RECTANGLE/ELLIPSE avec fill IMAGE :
-   Utiliser <img src="/placeholder.jpg" alt="..." className="..." />
-
-5. Respecter la hiérarchie parent-enfant de l arbre
-6. POSITIONNEMENT ABSOLU
-   Si un nœud a styles._positioning = "absolute", c est un conteneur absolu :
-   → Ajouter "relative" à son className
-   Si un nœud a styles._position avec top et left :
-   → Ajouter "absolute top-[Tpx] left-[Lpx]" à son className
-   Exemple :
-   - Parent avec _positioning: "absolute" → className="relative w-[584px] h-[273px]"
-   - Enfant avec _position: {top: 6.5, left: 18} → className="absolute top-[6.5px] left-[18px] ..."
-7. SIMPLIFICATION DES WRAPPERS
-- Si un FRAME ou GROUP n’a pas de styles significatifs, ne pas générer de <div>
-- Si un FRAME ou GROUP contient un seul enfant utile, retourner directement l’enfant (pas de wrapper)
-- Ne jamais créer de div vide ou inutile
-8. CONTRAINTES STRICTES
-- Ne jamais créer plusieurs niveaux de <div> inutiles
-- Ne jamais générer <div><div><div>...</div></div></div> sans raison
-EXEMPLE :
-
-Input :
-{
-  "section_tree": {
-    "name": "HeroSection",
-    "type": "FRAME",
-    "styles": {"layout": {"layoutMode": "VERTICAL", "padding": {"paddingTop": 40, "paddingBottom": 40}, "itemSpacing": 24}},
-    "children": [
-      {"type": "TEXT", "name": "hero-title", "characters": "Welcome", "styles": {"fontSize": 48, "fontWeight": 700, "color": {"hex": "#1a1a1a"}}},
-      {"type": "__COMPONENT_PLACEHOLDER__", "jsx_call": "<Button label=\\"Click me\\" />"}
-    ]
-  },
-  "imports": ["Button"]
-}
-
-Output :
-<div className="flex flex-col py-[40px] gap-[24px]">
-  <h1 className="text-[48px] font-bold text-[#1a1a1a]">Welcome</h1>
-  <Button label="Click me" />
-</div>
-12. INTERACTIONS :
-Si "interactions" existe dans le payload :
-- Si interactions.root n'est pas vide → ajouter une prop `onClick?: () => void` 
-  à l'interface, et la mettre sur l'élément racine du composant.
-- Si interactions.nodes contient des entrées → ajouter une prop optionnelle 
-  `on<NomDuNoeud>Click?: () => void` pour chaque clé, et la mettre 
-  sur l'élément correspondant.
-
-Exemple si interactions.nodes = {"Projects": [...], "Resume": [...]} :
-  Props : onProjectsClick?: () => void; onResumeClick?: () => void;
-  Usage : <span onClick={onProjectsClick}>...</span>
-          <span onClick={onResumeClick}>...</span>
-
-Ne PAS hardcoder de navigation ou route. Juste exposer les props.
-""".strip()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -590,17 +528,42 @@ def _generate_section_jsx(
     nested_instances: list,
     route_by_node_id: dict,
 ) -> str:
-    """Génère le JSX d'une section libre de manière déterministe."""
+    """Génère le JSX d'une section libre de manière déterministe.
+ 
+    ── FIX double-positionnement ──────────────────────────────────
+    section_data["styles"]["_position"] (position de la section
+    RACINE relative à la page) est déjà utilisé par _generate_page
+    pour envelopper cette section dans un <div absolute top-[..] 
+    left-[..]>. Si on laisse ce même _position dans les styles
+    envoyés à style_converter.py, celui-ci l'applique UNE SECONDE
+    FOIS automatiquement (_convert_positioning), ce qui double le
+    décalage (contenu 2x trop loin, scroll qui déborde).
+ 
+    On neutralise donc _position UNIQUEMENT sur le nœud racine
+    (copie superficielle, on ne touche pas au dict original ni aux
+    enfants) avant de générer le JSX interne. Le _position original
+    reste intact dans `section_data`, donc _generate_page peut
+    toujours le lire pour construire le wrapper englobant.
+    ══════════════════════════════════════════════════════════════
+    """
     from generator.style_converter import generate_section_jsx_deterministic
-
+ 
     section_name = section_data.get("name", "Section")
-    section_tree = _prepare_section_tree(section_data, route_by_node_id)
-
+ 
+    # Copie superficielle de la racine : on ne modifie pas section_data original
+    root_for_jsx = dict(section_data)
+    if isinstance(root_for_jsx.get("styles"), dict):
+        root_styles = dict(root_for_jsx["styles"])  # copie du sous-dict styles
+        root_styles.pop("_position", None)           # retire SEULEMENT ici
+        root_for_jsx["styles"] = root_styles
+ 
+    section_tree = _prepare_section_tree(root_for_jsx, route_by_node_id)
+ 
     jsx = generate_section_jsx_deterministic(
         section_tree,
         route_by_node_id=route_by_node_id,
     )
-
+ 
     print(f"    [DETERMINISTIC section] {section_name} ({len(jsx)} chars)")
     return jsx.strip()
 # ═══════════════════════════════════════════════════════════════
@@ -685,6 +648,27 @@ def _route_from_page_name(name: str) -> str:
 def _html_id_from_figma_id(figma_id: str) -> str:
     return "figma-" + str(figma_id).replace(":", "-").replace(";", "-")
 
+def _fmt_num(value) -> str:
+    """Formate un nombre : enlève .0 si entier (même logique que style_converter._fmt)."""
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
+    return str(value)
+
+
+def _extract_top_level_position(data: dict):
+    """Récupère (top, left) depuis data['styles']['_position'], si présent.
+    C'est la position de la section/instance top-level relative à la page,
+    calculée par section_extractor.py (offset local, PAS de coordonnées Figma globales).
+    """
+    styles = data.get("styles", {})
+    if isinstance(styles, dict):
+        pos = styles.get("_position")
+        if isinstance(pos, dict):
+            top = pos.get("top")
+            left = pos.get("left")
+            if top is not None and left is not None:
+                return top, left
+    return None
 
 def _wrap_with_interaction(jsx: str, interaction, route_by_node_id: dict) -> str:
     """Enveloppe le JSX selon le nouveau format d'interactions.
@@ -815,51 +799,51 @@ def _generate_page(page: dict, llm = None) -> tuple[str, str, int, int]:
     """
     page_name = page["page_name"]
     file_name = _sanitize_page_name(page_name)
-
+ 
     print(f"\n[generateur] Page : {file_name}.tsx")
-
+ 
     ordered_children = page.get("ordered_children", [])
     ordered_children.sort(key=lambda c: c.get("order_index", 0))
-
+ 
     route_by_node_id = page.get("_route_by_node_id", {})
-
+ 
     imports_needed = set()
     needs_link = False
     needs_navigate_hook = False
     needs_overlay_state = False
-
+ 
     def _check_interaction(interaction):
         """Détecte les besoins depuis une interaction (liste, nouveau format)."""
         nonlocal needs_link, needs_navigate_hook, needs_overlay_state
-        
+ 
         if not isinstance(interaction, list):
             return
-        
+ 
         for inter in interaction:
             for action in inter.get("actions", []):
                 nav = action.get("navigation")
                 atype = action.get("type")
-                
+ 
                 if nav == "NAVIGATE":
                     needs_link = True
-                    needs_navigate_hook = True   # ✅ besoin de navigate() pour child_interactions
+                    needs_navigate_hook = True   # besoin de navigate() pour child_interactions
                 elif nav == "OVERLAY":
                     needs_overlay_state = True
                 elif atype == "BACK":
                     needs_navigate_hook = True
-
+ 
     for child in ordered_children:
         data = child.get("data", {})
         _check_interaction(data.get("interaction"))
-
-        # ✅ NOUVEAU : détecter les besoins depuis child_interactions
+ 
+        # Détecter les besoins depuis child_interactions
         child_interactions = data.get("child_interactions", {})
         for inters in child_interactions.values():
             _check_interaction(inters)
-
+ 
         if child["kind"] == "instance":
             imports_needed.add(data.get("react_component_name"))
-
+ 
         elif child["kind"] == "section":
             if _tree_has_interaction_type(data, "NAVIGATE"):
                 needs_link = True
@@ -867,31 +851,30 @@ def _generate_page(page: dict, llm = None) -> tuple[str, str, int, int]:
                 needs_overlay_state = True
             if _tree_has_interaction_type(data, "BACK"):
                 needs_navigate_hook = True
-
+ 
             for inst in child.get("nested_instances", []):
                 imports_needed.add(inst.get("react_component_name"))
                 _check_interaction(inst.get("interaction"))
-                
-                # ✅ NOUVEAU
+ 
                 inst_child_inter = inst.get("child_interactions", {})
                 for inters in inst_child_inter.values():
                     _check_interaction(inters)
-
+ 
     imports_needed.discard(None)
-
+ 
     jsx_blocks = []
     overlay_blocks = []
     llm_calls = 0
-
+ 
     for child in ordered_children:
         kind = child["kind"]
         data = child["data"]
-
+ 
         if kind == "instance":
             react_name = data.get("react_component_name", "Component")
             props_values = data.get("props_values", {})
-            child_interactions = data.get("child_interactions", {})   # ✅ NOUVEAU
-
+            child_interactions = data.get("child_interactions", {})
+ 
             jsx = _build_component_jsx(
                 react_name,
                 props_values,
@@ -903,85 +886,123 @@ def _generate_page(page: dict, llm = None) -> tuple[str, str, int, int]:
                 data.get("interaction"),
                 route_by_node_id,
             )
-            # ✅ NOUVEAU : wrapper avec id pour permettre le scroll
+ 
+            # wrapper avec id pour permettre le scroll
             instance_id = data.get("id")
             if instance_id:
                 html_id = _html_id_from_figma_id(instance_id)
                 jsx = f'<div id="{html_id}">{jsx}</div>'
-
+ 
+            # ─── NOUVEAU : positionnement absolu top-level ───
+            # Place l'instance à sa vraie position sur le canvas de la page
+            # (relative à la page, calculée dans section_extractor.py).
+            top_pos = _extract_top_level_position(data)
+            if top_pos:
+                top, left = top_pos
+                jsx = (
+                    f'<div className="absolute top-[{_fmt_num(top)}px] '
+                    f'left-[{_fmt_num(left)}px]">{jsx}</div>'
+                )
+ 
             jsx_blocks.append("        " + jsx)
             print(f"  [INSTANCE]  <{react_name} /> (direct)")
-
+ 
         elif kind == "section":
             section_name = data.get("name", "Section")
             nested = child.get("nested_instances", [])
-
+ 
             print(f"  [SECTION]   {section_name} → génération déterministe...")
-
+ 
             try:
                 jsx = _generate_section_jsx(data, nested, route_by_node_id)
-
+ 
                 section_id = data.get("id")
                 if section_id:
                     html_id = _html_id_from_figma_id(section_id)
                     jsx = f'<div id="{html_id}">\n{jsx}\n</div>'
-
+ 
                 jsx = _wrap_with_interaction(
                     jsx,
                     data.get("interaction"),
                     route_by_node_id,
                 )
-
+ 
+                # ─── NOUVEAU : positionnement absolu top-level ───
+                # Place la section à sa vraie position sur le canvas de la page
+                # (relative à la page, calculée dans section_extractor.py).
+                top_pos = _extract_top_level_position(data)
+                if top_pos:
+                    top, left = top_pos
+                    jsx = (
+                        f'<div className="absolute top-[{_fmt_num(top)}px] '
+                        f'left-[{_fmt_num(left)}px]">\n{jsx}\n</div>'
+                    )
+ 
                 indented = "\n".join(
                     f"        {line}" if line.strip() else ""
                     for line in jsx.split("\n")
                 )
-
+ 
                 jsx_blocks.append(
                     f"        {{/* Section: {section_name} */}}\n{indented}"
                 )
-
+ 
                 llm_calls += 1
                 print(f"  [SECTION]   OK — {section_name} ({len(jsx)} chars)")
-
+ 
             except Exception as e:
                 print(f"  [ERREUR]    {section_name} : {e}")
                 jsx_blocks.append(
                     f"        {{/* ERREUR section {section_name} : {e} */}}"
                 )
-
+ 
     import_lines = []
-
+ 
     # Imports React Router (Link + useNavigate selon les besoins)
     router_imports = []
     if needs_link:
         router_imports.append("Link")
     if needs_navigate_hook:
         router_imports.append("useNavigate")
-    
+ 
     if router_imports:
         import_lines.append(
             f"import {{ {', '.join(router_imports)} }} from 'react-router-dom';"
         )
-
+ 
     for name in sorted(imports_needed):
         safe_name = _sanitize_component_name(name)
         import_lines.append(f"import {safe_name} from '../components/{safe_name}';")
-
+ 
     imports_str = "\n".join(import_lines)
     if imports_str:
         imports_str = "\n" + imports_str
-
+ 
     jsx_body = "\n\n".join(jsx_blocks) if jsx_blocks else "        {/* Page vide */}"
     overlays_body = "\n\n".join(overlay_blocks)
-
+ 
     page_styles = page.get("page_styles", {})
     page_bg = ""
     if "backgroundColor" in page_styles:
         page_bg = f' bg-[{page_styles["backgroundColor"]}]'
-
+ 
     page_width = int(page_styles.get("width", 1440))
     page_height = int(page_styles.get("height", 1024))
+    real_content_bottom = 0
+    for _child in ordered_children:
+        _child_data = _child.get("data", {})
+        _child_styles = _child_data.get("styles", {})
+        if not isinstance(_child_styles, dict):
+            continue
+        _pos = _child_styles.get("_position")
+        _height = _child_styles.get("height")
+        if isinstance(_pos, dict) and _height:
+            _top = _pos.get("top", 0) or 0
+            real_content_bottom = max(real_content_bottom, _top + _height)
+        if real_content_bottom > 0:
+            page_height = int(round(real_content_bottom))         
+
+
 
     # Construction des hooks (navigate + activeOverlay)
     hooks_lines = []
@@ -989,13 +1010,13 @@ def _generate_page(page: dict, llm = None) -> tuple[str, str, int, int]:
         hooks_lines.append("  const navigate = useNavigate();")
     if needs_overlay_state or overlay_blocks:
         hooks_lines.append("  const [activeOverlay, setActiveOverlay] = useState<string | null>(null);")
-    
+ 
     hooks_block = "\n".join(hooks_lines)
     if hooks_block:
         hooks_block += "\n"
-
+ 
     page_code = f"""import React, {{ useEffect, useState }} from 'react';{imports_str}
-
+ 
 export default function {file_name}() {{
   const [scale, setScale] = useState(1);
 {hooks_block}
@@ -1006,35 +1027,42 @@ export default function {file_name}() {{
       const newScale = Math.min(1, screenWidth / designWidth);
       setScale(newScale);
     }};
-
+ 
     updateScale();
     window.addEventListener('resize', updateScale);
     return () => window.removeEventListener('resize', updateScale);
   }}, []);
+ 
 
-  return (
+
+
+return (
     <div
-      className="w-full overflow-x-hidden flex justify-center{page_bg}"
-      style={{{{ minHeight: `${{{page_height} * scale}}px` }}}}
+      className="w-full overflow-hidden relative{page_bg}"
+      style={{{{ height: `${{{page_height} * scale}}px` }}}}
     >
       <div
-        className="relative flex-shrink-0"
+        className="absolute top-0 left-1/2"
         style={{{{
           width: `{page_width}px`,
           height: `{page_height}px`,
-          transform: `scale(${{scale}})`,
+          transform: `translateX(-50%) scale(${{scale}})`,
           transformOrigin: 'top center',
         }}}}
       >
-{jsx_body}
 
+
+
+
+{jsx_body}
+ 
 {overlays_body}
       </div>
     </div>
   );
 }}
 """
-
+ 
     return file_name, page_code, llm_calls, len(imports_needed)
 
 def generate_pages(sections_data: dict, llm = None) -> None:
